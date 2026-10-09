@@ -1275,7 +1275,17 @@ class Vision:
         self.dir = Path(tempfile.mkdtemp(prefix="strata-vision-"))
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.stopped = False
-        self._start()
+        # local: "lazy": true - the encoder is not started with the server; the first image that is not cached starts
+        # it (on_start runs first: the service shrinks the elastic expert cache to make room), and the service's idle
+        # watcher stops it again, so text-only use keeps the whole VRAM for experts
+        self.lazy = bool(cfg.get("lazy"))
+        self.on_start = None
+        self.last_used = 0.0
+        self.proc = None
+        if self.lazy:
+            self.stopped = True
+        else:
+            self._start()
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
 
@@ -1290,7 +1300,7 @@ class Vision:
         self.stopped = False
 
     def alive(self) -> bool:
-        return not self.stopped and self.proc.poll() is None
+        return not self.stopped and self.proc is not None and self.proc.poll() is None
 
     def unload(self):
         """Stop the encoder process (its VRAM or RAM goes back); the encoded images stay cached on disk."""
@@ -1300,7 +1310,8 @@ class Vision:
     def restart(self):
         """Start the encoder again after an unload (or if it died); the cache of encoded images is kept."""
         try:
-            self.proc.kill()
+            if self.proc is not None:
+                self.proc.kill()
         except OSError:
             pass
         self._start()
@@ -1354,6 +1365,12 @@ class Vision:
             if key in self.cache:
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
+            self.last_used = time.time()
+            if self.lazy and not self.alive():
+                if self.on_start is not None:
+                    self.on_start()
+                print("[strata] starting the vision encoder (lazy) ...", flush=True)
+                self._start()
             img.write_bytes(data)
             try:
                 self.proc.stdin.write(f"ENC {img} {out}\n")
@@ -1371,6 +1388,8 @@ class Vision:
             return self.cache[key]
 
     def close(self):
+        if self.proc is None:
+            return
         try:
             self.proc.stdin.write("QUIT\n")
             self.proc.stdin.flush()
@@ -1750,7 +1769,8 @@ class Service:
         return value if value > 0 else None
 
     def _vision_down(self) -> bool:
-        return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
+        return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive() and \
+            not getattr(self.vision, "lazy", False)         # a lazy encoder starts with its first image instead
 
     def free_vram_mib(self) -> int | None:
         """Free VRAM on the engine's (first) GPU, from NVML (AMD backend: amdgpu's sysfs files, #301); None when it can't
@@ -1909,6 +1929,49 @@ class Service:
                     print(f"[strata] idle unload: {e}", flush=True)
         threading.Thread(target=loop, daemon=True).start()
 
+    def start_lazy_vision(self, reserve_mib: int, idle_s: float):
+        """local: a "lazy" image encoder on an elastic expert cache.  Before the encoder starts (its first uncached image;
+        the caller holds the FIFO, so the engine is idle) the cache shrinks until `reserve_mib` is free; after `idle_s`
+        without an encode the encoder stops and the cache grows back to the reserve the engine started with."""
+        v = self.vision
+        if v is None or not getattr(v, "lazy", False):
+            return
+        elastic = hasattr(self.engine, "vram") and bool((getattr(self.engine, "info", {}) or {}).get("vram_elastic", True))
+
+        def make_room():
+            if not elastic or not self.loaded():
+                return
+            try:
+                out = self.engine.vram(reserve_mib)
+                print(f"[strata] lazy vision: expert cache shrunk for the encoder ({out.get('expert_slots')} slots, "
+                      f"{out.get('vram_free_mib')} MiB free)", flush=True)
+            except (ValueError, EngineDied) as e:
+                print(f"[strata] lazy vision: could not shrink the expert cache ({e}); starting the encoder anyway",
+                      flush=True)
+        v.on_start = make_room
+        print(f"[strata] lazy vision: the encoder starts with the first image and stops after {idle_s:.0f} s idle",
+              flush=True)
+
+        def loop():
+            while True:
+                time.sleep(max(1.0, min(15.0, idle_s / 4)))
+                if not v.alive() or time.time() - v.last_used < idle_s:
+                    continue
+                if not self.fifo.acquire(timeout=1.0):  # a request is running: the next turn
+                    continue
+                try:
+                    if not v.alive() or time.time() - v.last_used < idle_s:
+                        continue
+                    v.unload()
+                    out = self.engine.vram(None) if elastic and self.loaded() else {}
+                    print(f"[strata] lazy vision: encoder stopped after {idle_s:.0f} s idle; expert cache grown back "
+                          f"({out.get('expert_slots')} slots)", flush=True)
+                except Exception as e:                  # the thread keeps running
+                    print(f"[strata] lazy vision: {e}", flush=True)
+                finally:
+                    self.fifo.release()
+        threading.Thread(target=loop, daemon=True, name="strata-lazy-vision").start()
+
     def set_shared(self, defaults) -> dict:
         """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
         self.shared = clean_shared_defaults(defaults)
@@ -2048,7 +2111,11 @@ class Service:
                 "tok_s": round(self._tok_s(), 1) if state == "generating" else None,
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
-                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
+                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None,
+                # what it is thinking and writing right now (llama.cpp exposes the sampled tokens; these are the
+                # decoded text tails, ~4 KB each)
+                "thinking": (s.get("reasoning_tail") or "") if s.get("busy") else None,
+                "output": (s.get("output_tail") or "") if s.get("busy") else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
         par = int(getattr(self.engine, "batch", 0) or 0)
@@ -2071,6 +2138,63 @@ class Service:
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
+
+    def metrics_prometheus(self) -> str:
+        """GET /metrics with `format=prometheus` (or an `Accept: text/plain`): the same numbers as `metrics()`, in
+        Prometheus text, under llama.cpp's own metric names (`llamacpp:*`) so a llama-server dashboard scrapes a
+        Strata server as it is, plus `strata:*` for what llama.cpp has no name for (prefill/decode rate, the live
+        phase, the expert tiers, VRAM)."""
+        m = self.metrics()
+        live, tot, hw, eng, static = m["live"], m["totals"], m["hardware"], m["engine"], m["hardware_static"]
+
+        def series(name, help_, value, kind="gauge", labels=""):
+            if value is None:
+                return ""
+            return f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name}{labels} {value}\n"
+
+        def rate(ms, n):        # a mean rate from a total and its milliseconds (llama.cpp's *_seconds gauges)
+            return round(n / (ms / 1000.0), 3) if ms and n else None
+
+        out = [
+            # llama.cpp's names
+            series("llamacpp:prompt_tokens_total", "prompt tokens processed", tot.get("prompt_tokens"), "counter"),
+            series("llamacpp:prompt_seconds_total", "seconds spent on prompt evaluation",
+                   round(tot.get("prompt_ms", 0) / 1000.0, 3), "counter"),
+            series("llamacpp:tokens_predicted_total", "tokens generated", tot.get("output_tokens"), "counter"),
+            series("llamacpp:tokens_predicted_seconds_total", "seconds spent generating",
+                   round(tot.get("decode_ms", 0) / 1000.0, 3), "counter"),
+            series("llamacpp:n_decode_total", "requests served", tot.get("requests"), "counter"),
+            series("llamacpp:prompt_tokens_seconds", "prompt evaluation rate (tok/s)",
+                   live.get("prefill_tok_s_mean") or rate(tot.get("prompt_ms"), tot.get("prompt_tokens"))),
+            series("llamacpp:predicted_tokens_seconds", "generation rate (tok/s)",
+                   live.get("tok_s") or rate(tot.get("decode_ms"), tot.get("output_tokens"))),
+            series("llamacpp:requests_processing", "requests being processed",
+                   1 if live.get("state") in ("reading", "generating") else 0),
+            series("llamacpp:requests_deferred", "requests waiting their turn", live.get("queued")),
+            series("llamacpp:kv_cache_tokens", "context tokens in use",
+                   (live.get("prompt_tokens") or 0) + (live.get("generated") or 0)),
+            # Strata extras
+            series("strata:info", "engine facts", 1,
+                   labels=f'{{model="{eng.get("model")}",ctx="{eng.get("max_context")}"}}'),
+            series("strata:context_max_tokens", "max context", eng.get("max_context")),
+            series("strata:generated_tokens", "tokens generated in the running request", live.get("generated")),
+            series("strata:phase", "1 while the model is in this phase (reading|thinking|answering|tool)",
+                   1, labels=f'{{phase="{live.get("phase") or "none"}"}}'),
+            series("strata:experts_vram", "expert slots resident in VRAM", eng.get("experts_vram")),
+            series("strata:arena_experts", "experts held in the host arena", eng.get("arena_experts")),
+            series("strata:requests_total", "requests served", tot.get("requests"), "counter"),
+            series("strata:reused_tokens_total", "prompt tokens reused from the conversation cache",
+                   tot.get("reused"), "counter"),
+            series("strata:gpu_util_percent", "GPU utilisation", hw.get("gpu_util")),
+            series("strata:gpu_mem_used_bytes", "GPU memory used", hw.get("gpu_mem_used")),
+            series("strata:gpu_mem_total_bytes", "GPU memory total", hw.get("gpu_mem_total")),
+            series("strata:gpu_temp_celsius", "GPU temperature", hw.get("gpu_temp")),
+            series("strata:gpu_power_watts", "GPU power draw", hw.get("gpu_power")),
+            series("strata:ram_used_bytes", "system RAM used", hw.get("ram_used")),
+            series("strata:ram_total_bytes", "system RAM total", hw.get("ram_total")),
+        ]
+        _ = static
+        return "".join(out)
 
     def v1_status(self) -> dict:
         """GET /v1/status: what this server is and does, for a client that would rather ask than guess (a front-end
@@ -2222,6 +2346,12 @@ class Service:
                 elif ev.kind == "tool_call":
                     s["phase"] = "tool call complete"
                 s["tail"] = ((s.get("tail") or "") + (ev.text or ""))[-600:]
+                # the live thinking and answer text, kept separately, for /metrics and /slots (llama.cpp shows the
+                # sampled tokens; this shows what is being thought and written as it happens)
+                if ev.kind == "reasoning":
+                    s["reasoning_tail"] = ((s.get("reasoning_tail") or "") + (ev.text or ""))[-4000:]
+                elif ev.kind in ("content", "tool_call", "tool_start"):
+                    s["output_tail"] = ((s.get("output_tail") or "") + (ev.text or ""))[-4000:]
 
     def _progress(self, last_print, every=1.0, st=None):
         """A progress line in the server window every `every` seconds while a request runs."""
@@ -2283,7 +2413,7 @@ class Service:
                     with self.status_lock:
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
-                                  max_tokens=max_new)
+                                  reasoning_tail="", output_tail="", max_tokens=max_new)
                         if par:
                             self.live_reqs[id(st)] = (st, rate)
                             self.status.update(st)
@@ -2995,8 +3125,18 @@ def make_handler(svc: Service):
                 return
             if path == "/metrics":
                 if self._authorized():
-                    # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
-                    self._json(200, svc.metrics(all_requests="requests=all" in self.path))
+                    # Prometheus text with `format=prometheus` or `Accept: text/plain` (llama.cpp's /metrics shape);
+                    # JSON by default (the Monitor tab).  `?requests=all` keeps every request in the JSON.
+                    wants_prom = "format=prometheus" in self.path or "text/plain" in (self.headers.get("Accept") or "")
+                    if wants_prom:
+                        body = svc.metrics_prometheus().encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    else:
+                        self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
             if path == "/api/requests" and svc.api_monitor:
                 if self._authorized():
@@ -3066,8 +3206,19 @@ def make_handler(svc: Service):
                 if self._authorized():
                     loaded = not hasattr(svc.engine, "alive") or svc.engine.alive()
                     with svc.status_lock:
-                        busy = bool(svc.status.get("busy"))
-                    slot = {"id": 0, "n_ctx": svc.engine.max_context, "is_processing": busy}
+                        st = dict(svc.status)
+                    busy = bool(st.get("busy"))
+                    slot = {"id": 0, "n_ctx": svc.engine.max_context, "is_processing": busy,
+                            "state": "generating" if busy and st.get("first_token") else
+                                     ("reading" if busy else "idle"),
+                            "phase": st.get("phase") if busy else None,
+                            "prompt_tokens": st.get("prompt_tokens") if busy else None,
+                            "generated": st.get("generated") if busy else None,
+                            "max_tokens": st.get("max_tokens") if busy else None,
+                            "elapsed_s": round(time.time() - st["started"], 1) if busy and st.get("started") else None,
+                            "tok_s": round(svc._tok_s(), 1) if busy and st.get("first_token") else None,
+                            "reasoning": st.get("reasoning_tail") if busy else None,
+                            "content": st.get("output_tail") if busy else None}
                     self._json(200, [slot] if loaded else [])
             elif path == "/v1/status":
                 if self._authorized():
@@ -4092,6 +4243,9 @@ def main() -> int:
         atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
     svc.start_idle_unload()
+    if cfg.get("vision") and cfg["vision"].get("lazy"):
+        svc.start_lazy_vision(int(cfg["vision"].get("lazy_reserve_mib", 2400)),
+                              float(cfg["vision"].get("lazy_idle_s", 300)))
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
