@@ -1,213 +1,156 @@
-<h1 align="center">Strata-DS4</h1>
+<h1 align="center">Strata-GLM</h1>
 
-<p align="center"><b>DeepSeek-V4-Flash (284B MoE) on one gaming PC, faster than llama.cpp</b><br>
-A DeepSeek-V4 engine built on <a href="https://github.com/Niko1221/Strata">Strata</a> · Linux · NVIDIA · MIT</p>
+<p align="center"><b>GLM-5.3-Flash (320B MoE) on one gaming PC: 25 tok/s decode, ~400 tok/s prefill, 512K context</b><br>
+A GLM-5.3-Flash engine built on <a href="https://github.com/Niko1221/Strata">Strata</a> · Linux · NVIDIA · MIT</p>
 
-> **Status: experimental, single-developer research code.** It generates correct, coherent text and beats
-> llama.cpp's best configuration on the machine below, but it has been measured on exactly one PC, has no server or
-> chat UI of its own yet, and serves one sequence at a time. Expect rough edges. The upstream Strata README (the
-> Qwen3.8-Flash engine this is built on) is in [README.strata.md](README.strata.md).
+> **Status: experimental, single-developer research code.** It produces correct, coherent text and serves an
+> OpenAI- and Anthropic-compatible API. It has been measured on one PC only and handles one sequence at a time.
+> Expect rough edges. The DeepSeek-V4-Flash engine this grew out of is described in [README.ds4.md](README.ds4.md),
+> and the upstream Strata README (Qwen3.8-Flash) is in [README.strata.md](README.strata.md).
 
 ## What this is
 
-[Strata](https://github.com/Niko1221/Strata) is an inference engine specialised for one MoE model
-(Qwen3.8-Flash-Next): the hot experts live in a VRAM cache, the rest in pinned RAM, and each layer's misses are
-split between the CPU and PCIe at the same time. This fork applies the same idea to **DeepSeek-V4-Flash-0731**, an
-architecture llama.cpp supports but which is unusually hard to run fast on a consumer PC:
+[Strata](https://github.com/Niko1221/Strata) is an inference engine built for large MoE models on consumer hardware.
+Hot experts stay in a VRAM cache and most of the rest in a pinned RAM arena. Each layer's misses are split between
+the CPU and PCIe at the same time. This repo applies that design to **GLM-5.3-Flash** (320B total / 18B active, MIT),
+the strongest open "Flash"-class model when this work started (Artificial Analysis index 42, vs DeepSeek V4.1 Flash 39).
 
-- 43 layers × 256 experts (top-6), ~73 GiB of experts at 2-bit - far more than VRAM, most of RAM;
-- **hyper-connections** (4 residual streams mixed by a 20-iteration Sinkhorn normalisation every layer);
-- **compressed sparse attention** (raw 128-token window + 4× compressed blocks chosen by a "lightning indexer" + 128×
-  compressed blocks), attention sinks, a grouped output LoRA, hash routing on the first 3 layers, a SwiGLU clamp.
+GLM-5.3-Flash is an unusual hybrid:
+
+- **mHC hyper-connections**, as in DeepSeek V4: 4 residual streams, mixed with a Sinkhorn normalisation in every layer.
+- **KDA (Kimi Delta Attention)** linear attention in 34 of 45 layers. Its state has a fixed size whatever the context length.
+- **MLA with a lightning indexer** in the other 11 layers. Sparse attention picks the top 2048 tokens, so long context stays cheap.
+- 45 layers × 288 routed experts. Routing is **flat** (no small hot set), so the engine is built around high
+  residency, not a tiny cache.
+
+### The model: Maya-S-v2 + runtime abliteration
+
+The default model is **GLM-5.3-Flash Maya-S-v2** by peasantsmith (3 GGUF shards, ~96 GB). Its experts are FP8-derived
+i-quants (IQ2_XXS gate/up, IQ2_S/IQ3_XXS down) and its dense half is Q6_K. It replaced the earlier 3.0-bit GSQ-RCO
+file because it is faster and has better chat perplexity here.
+
+Uncensoring is a **rank-1 abliteration LoRA applied at run time**
+(GCSA Abliterix v2, StrongREJECT refusal 1.7%). It covers attention outputs, the shared expert and the routed experts,
+on every path: VRAM, PCIe, CPU pool and MMQ prefill. The model file is never modified. `--stock` serves it without
+the LoRA.
 
 ## How fast is it?
 
-Measured on: **RTX 4090 24 GB · Ryzen 7 5700X (8 cores, AVX2) · 90 GB DDR4-3200 · NVMe**, model
-`DeepSeek-V4-Flash-Q2-0731.gguf` (80.8 GiB: experts IQ2_XXS gate/up + Q2_K down, dense Q8_0). Decode = greedy
-generation, 128 tokens after a 600-token prompt; quality = perplexity over that prompt (lower is better).
+Measured on: **RTX 4090 24 GB · Ryzen 7 5700X (8 cores, AVX2) · 90 GB DDR4-3200 · NVMe**.
+Workload: a real 12.7K-token chat turn (with thinking), then 256 greedy tokens, at **512K context**. The shipped
+config ([`tools/glm/serve/strata-glm-maya-abl-512k.json`](tools/glm/serve/strata-glm-maya-abl-512k.json)) was used
+with the abliteration LoRA on. Noise is about ±2%.
 
-**Decode**
+| | prefill | decode |
+|---|---:|---:|
+| **Strata-GLM now** (Maya-S-v2 + LoRA, native Q6_K dense, 512K) | **~390-400 tok/s** | **25.0 tok/s** |
+| same, `--dense-requant q4_k` (+1.6% chat ppl) | ~399 tok/s | 27.2 tok/s |
+| Maya-S-v2, first wiring (300K) | 205 tok/s | 21.7 tok/s |
+| previous model (GSQ-RCO 3.0-bit, ablated, 300K) | 158 tok/s | 17.8 tok/s |
 
-| Engine / config | Decode | Perplexity |
-| --- | ---: | ---: |
-| llama.cpp, best config (`-ngl 99 -cmoe --moe-expert-cache 40 -fa on`) | 16.3 tok/s | - |
-| Strata-DS4 2026-10-07 (`--dense-requant q6_k --slots auto`) | 16.8-17.3 tok/s | 10.47-10.64 |
-| **Strata-DS4 now** (`--vram-lru --pf-b 0.7 --arena-skip-resident --arena-gib 58`, recommended) | **23.3-24.0 tok/s** | 10.37-10.55 |
-| + `--route-bias 0.05` (lossy, see below; measured on the older config: +9% / +1% perplexity) | - | - |
+**Long prompts** (512K config): 50K tokens prefill at ~400 tok/s, 100K at ~330 tok/s. Past 64K tokens the chunk is
+halved for each doubling of the attention cap, so the indexer's scratch always fits.
 
-The 2026-10-08 numbers were measured with a video player and other background processes using about a core of the
-CPU (the CPU computes part of the expert misses, so a quiet machine should do a little better). Perplexity moves by
-up to ~0.2 between identical runs: which experts the CPU and which the GPU computes depends on timing, and the two
-paths round differently (q8_1 vs Q8_K activations).
+**Quality**: exact-math perplexity (no expert skipping, 4K tokens), Maya + LoRA:
 
-**Prompt processing (prefill)**
+| dense half | chat | code |
+|---|---:|---:|
+| **Q6_K native (shipped)** | **5.273** | **3.601** |
+| q4_k requant | 5.355 (+1.6%) | 3.654 (+1.5%) |
+| q5_k requant | 5.598 (+6.2%) | 3.641 (+1.1%) |
 
-| Prompt | decode-loop prefill (before) | `--prefill-chunk 4096 --chunk-mmq --chunk-prestage` |
-| --- | ---: | ---: |
-| 3,000 tokens | ~18-21 tok/s | 184-259 tok/s |
-| 6,000 tokens | ~18-21 tok/s | **359-392 tok/s** |
-
-Chunked prefill is longer-prompt-faster: each chunk streams every expert of every layer over PCIe once (~74 GB), so
-the cost per token falls as the chunk fills. It uses MMQ (int8 tensor cores) for the expert products, so perplexity
-moves by ~0.3% (6.38 -> 6.39-6.41 on the 3K prompt); without `--chunk-mmq` it is the decode math.
-
-**Long context** (2026-10-08/09)
-
-Measured up to a 128K-token real document (chunked prefill 4096); 256K loads and decodes. DeepSeek-V4's
-compressed sparse attention makes long context cheap in principle - each CSA layer attends to a fixed 512 compressed
-blocks chosen by its lightning indexer - but the indexer itself scores every block, and that was the cost that grew:
-
-| position | prefill | attention+router per token, before -> now | decode before | decode now |
-| --- | ---: | ---: | ---: | ---: |
-| 600 | (decode loop) | 15.5 ms -> 15.9 ms | 25.0 tok/s | 23.7-25.3 tok/s |
-| 16,384 | 466 tok/s | 28.7 ms -> - | 12.7 tok/s | not re-measured yet |
-| 131,072 | 248 tok/s | 48.1 / 38.2 ms -> **17.1-18.7 ms** | 10.4 tok/s | **19.0-22.4 tok/s** (probe, upper bound) |
-| 262,144 | - | -> 18.5 ms | - | **21.8 tok/s** (probe, upper bound) |
-
-- "Now" = the fused lightning-indexer kernel (one CUDA kernel for score + ReLU + head weights + mask instead of a
-  ~9-op chain with two `[blocks x 64]` copies, on by default off-CPU) and an O(512) instead of O(blocks) sparse row
-  selection. The attention column is real; the "now" decode totals come from a `--pos-offset` probe (decoding at a deep
-  position over empty caches), whose expert hit rate is a short prompt's (~80%) rather than a long document's
-  (53-63% measured), so a real 128K document will land between the two columns. A real-document re-run is next.
-- Prefill at 128K was 73% dense-half time; query-blocked raw-window attention (`DS4_RAW_BLOCK`) is in but its long
-  prefill timing is not measured yet.
-
-**Compressed KV cache options** (the CSA/HCA compressed-key caches; quality on the 600-token prompt):
-
-| `--comp-type` | bytes vs F32 | perplexity |
-| --- | ---: | ---: |
-| `f32` (default) | 1x | 10.4468 |
-| `q8_0` + `--icomp-q8` | ~0.27x | 10.5031 (+0.54%) |
-| **`iq4_nl` + `--icomp-q8`** (recommended for long context) | ~0.14x | **10.5090 (+0.60%)** |
-| `q4_0` + `--icomp-q8` | ~0.14x | 10.5358 (+0.85%) |
-
-Below 8 bits the rows are Walsh-Hadamard rotated (128-blocks) before rounding and after the gather (`--comp-rot`
-forces it either way); that is why 4-bit costs barely more than 8-bit here. At 256K the 4-bit caches give back a few
-GB of VRAM, i.e. a few hundred more expert slots. `--comp-host` keeps the cache in pinned RAM (zero-copy reads); it
-works, but at 256K it costs ~3 ms/token for +62 slots - only worth it beyond ~512K.
-
-**Adaptive expert pruning (2026-10-09, experimental)**
-
-`--prune LIST --prune-penalty 0.5 --arena-adapt`: a REAP-scored list of the least useful 25% of experts (calibrated on
-English + Chinese + code) is kept out of VRAM and RAM and left on NVMe; the router can still pick one when it wants it
-by more than the penalty, and a picked expert is promoted into the RAM arena (least-recently-used out), so the
-experts a conversation actually needs move in. On held-out text (9.6K tokens, per-domain perplexity vs unpruned):
-
-| | code / English / Chinese | German | French / Japanese / Portuguese (never calibrated) | all | decode |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| hard prune 25% | -1.0 to +1.2% | +72% | +7 to +115% | +25.6% | 19.3 tok/s |
-| **soft 25% + adapt** | -1.4 to +0.9% | +3.9% | -0.3 to +0.8% | **+0.3%** | **17.25 tok/s** |
-| random 25% (control) | +17 to +29% | +40% | +6 to +35% | +20.7% | 18.9 tok/s |
-| unpruned | - | - | - | - | 15.71 tok/s |
-
-Calibration: `ds4_generate --prefill-chunk 4096 --chunk-mmq --saliency sal.bin` on a mixed prompt
-(`tools/ds4/make_reap_prompts.py`), then `tools/ds4/reap_prune.py sal.bin --frac 0.25 -o prune.txt`. The saliency
-accumulator and `reap_prune.py` come from the Strata-GLM work. Details: [FINDINGS s37](docs/ds4/FINDINGS.md).
-
-The first token's logits match llama.cpp's (same top-1; KL 0.03-0.10, which is the difference between the GPU's and
-the CPU's 8-bit activation rounding).
+Decode is **PCIe-bound**. An nsys profile puts the H2D copy engine at 26 ms/token busy (~22 GB/s, the PCIe 4.0
+ceiling) against 16 ms of kernels. The CPU pool already overlaps the GPU, so the remaining gains come from moving
+fewer bytes, not from fewer syncs.
 
 ## How it works
 
-Per token, per layer (`tools/ds4/ds4_generate.cpp`):
+Each token, layer by layer ([`tools/glm/glm_generate.cpp`](tools/glm/glm_generate.cpp)):
 
-1. **Predict** (`Ds4Dense::predict`): the layer's router applied to an earlier hidden state guesses the experts
-   (~62-70% recall) and the predicted misses start DMA-ing into VRAM on a second CUDA stream **under** the attention.
-2. **Attention + router** (`Ds4Dense`, ggml on CUDA, CUDA graphs, fused hyper-connection ops, one input upload per
-   token, one readback per layer).
-3. **Experts** (`Ds4MoeTier`): hits from the VRAM slot cache (seeded from a routing profile), prefetched experts, a
-   share of the misses DMA'd over PCIe and computed on the GPU, the rest computed by the CPU pool straight from a
-   pinned RAM arena - all three at once.
-4. **Finish**: shared expert + routed sum, hyper-connection post-mix.
+1. **Predict.** The layer's router runs on an earlier hidden state to guess the experts (fused into the previous
+   layer's finish graph), and predicted misses start DMA-ing into VRAM on a second stream (`--pf-b 1.0`).
+2. **Attention + router.** `GlmDense` runs a ggml graph on CUDA: KDA or MLA + indexer, fused mHC ops and CUDA graphs.
+3. **Experts.** The expert tier (shared with Strata-DS4) serves each expert from one of:
+   - a VRAM slot cache, seeded by a **live census** of expert use (`--census`);
+   - prefetched experts;
+   - PCIe-streamed misses;
+   - a CPU pool reading the pinned **64 GiB RAM arena**.
 
-What moved the needle on the real model (each step measured, in order): CUDA graphs 5.6 → 9.7 tok/s; llama.cpp's
-fused DeepSeek-V4 hyper-connection kernels 11.2; enough VRAM back for 2150 expert slots 12.8; a 70 GiB RAM arena
-(no NVMe reads mid-token) 16.3; PCIe share + one upload per token 17.0; then (2026-10-08) reusing the captured CUDA
-graphs without ggml's per-call node compare (attention 22 → 17 ms/token) 18.8; an exclusive VRAM LRU (a miss takes the
-least-recently-used slot of its layer; hit rate 70 → 84%) 22.3; one shared compute arena for all ~500 attention graph
-variants (~850 MiB of VRAM → +120 expert slots) and skipping the compressed-row pooling on tokens that complete no
-block (3 of 4 tokens in CSA layers, 127 of 128 in HCA) → 23-24.
+   `--pcie auto` balances the last two.
+4. **Finish.** Shared expert + routed sum, then the mHC post-mix.
 
-**Prefill** (`--prefill-chunk N`): the same per-layer graphs for N tokens at once, built per chunk on a shared
-allocator; the expert side streams each layer's experts into VRAM once per chunk and runs them through MMQ, the next
-layer's experts DMA in while the current one computes, and the VRAM expert cache is seeded after the prompt.
+Other pieces that made the numbers above:
+
+- **Soft REAP pruning** (`--prune`, 25%, penalty 0.05): the least useful experts stay out of the hot tiers, but the
+  router can still pick them. With `--skip-miss/--skip-file 0.15 --renorm-skip`, quality is unpruned-level.
+  Soft-pruned experts that the census sees used are packed into spare arena space instead of being read from NVMe.
+- **Chunked prefill** (`--prefill-chunk 4096 --chunk-mmq`): each layer's experts stream into VRAM once per chunk and
+  run through MMQ, with the LoRA delta applied.
+- **Elastic VRAM cache** (`--vram-grow`): before a long prompt the expert cache shrinks to make room for prefill
+  scratch, and it grows back afterwards (~0.1-0.2 s).
+- **Multi-turn**: the engine snapshots its state at the end of each prompt, so a follow-up turn only prefills the new
+  tokens.
+
+Rejected after measurement: MTP / speculative decoding (verification touches more distinct experts, and at ~40%
+residency that cancels the saved passes: +2% at best), cache-biased routing (the hit rate fell), and a baked
+abliteration. The reasoning and every measurement are in [`docs/glm/FINDINGS.md`](docs/glm/FINDINGS.md) (s1-s28).
 
 ## Running it
 
-Requirements: Linux, CUDA 13.x toolkit, an NVIDIA GPU with 24 GB, **~80 GB of free RAM**, the GGUF above.
+Requirements: Linux, CUDA 13.x, an NVIDIA GPU with 24 GB, ~80 GB free RAM, the Maya-S-v2 GGUF shards and (for
+uncensored output) the GCSA Abliterix v2 LoRA GGUF.
 
 ```bash
-git clone https://github.com/Indras-Mirror/Strata-DS4 && cd Strata-DS4
-cmake -S . -B build-ds4-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_GGML_CUDA=ON \
+git clone https://github.com/Indras-Mirror/Strata-GLM && cd Strata-GLM
+# third_party/llama.cpp: apply our ggml patch (no CUDA graphs for batched prefill passes - avoids a VRAM OOM)
+patch -d third_party/llama.cpp -p1 < tools/glm/patches/0001-ggml-cuda-no-graph-for-batched-passes.patch
+cmake -S . -B build-glm-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_GGML_CUDA=ON \
       -DSTRATA_MMQ_KQUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DSTRATA_GGML_DIR=$PWD/third_party/llama.cpp
-ninja -C build-ds4-gpu ds4_generate          # ggml-cuda takes ~10 minutes the first time
-
-# token ids in, token ids out (tools/ds4/ds4_chat.py does text <-> ids with the GGUF's tokenizer)
-# short prompts, fastest decode
-bash tools/ds4/memguard.sh 80 78 -- build-ds4-gpu/ds4_generate -m DeepSeek-V4-Flash-Q2-0731.gguf \
-     --ids 0,1,2 -n 128 --slots auto --pcie 0.55 --dense-requant q6_k --vram-lru --pf-b 0.7 \
-     --arena-skip-resident --arena-gib 58 --profile bench/ds4-2026-10-05/route-probe/ds4routes.bin
-# long prompts: chunked prefill (needs the full arena - do NOT combine with --arena-skip-resident)
-bash tools/ds4/memguard.sh 80 78 -- build-ds4-gpu/ds4_generate -m DeepSeek-V4-Flash-Q2-0731.gguf \
-     --ids-file prompt.i32 -n 128 --slots auto --arena-gib 70 --pcie 0.55 --dense-requant q6_k --vram-lru --pf-b 0.7 \
-     --prefill-chunk 4096 --chunk-mmq --chunk-prestage --profile bench/ds4-2026-10-05/route-probe/ds4routes.bin
-python3 tools/ds4/ds4_chat.py "Explain RoPE in two sentences." -n 128 --model DeepSeek-V4-Flash-Q2-0731.gguf -- \
-     --slots auto --arena-gib 70 --pcie 0.55 --dense-requant q6_k --profile bench/ds4-2026-10-05/route-probe/ds4routes.bin
+ninja -C build-glm-gpu glm_generate
 ```
 
-`memguard.sh` runs the engine in a cgroup with a hard RAM cap and swap off, so a misconfiguration kills the process
-instead of freezing the desktop - use it. Startup takes ~1.5-2 minutes (the 70 GiB arena is read and pinned).
+**Serve it** (OpenAI `/v1` + Anthropic `/v1/messages` + `/health`). Edit the model and LoRA paths in the JSON first.
+The shim uses Strata's `serve` package and currently expects a Strata checkout and its venv at `~/AI/Strata`:
 
-Useful flags: `--slots N|auto` (VRAM expert cache), `--arena-gib` (pinned RAM arena; the rest is read from the file),
-`--pcie F` (share of misses sent over PCIe), `--pf-b` (predicted prefetch per layer), `--dense-requant q4_k|q5_k|q6_k`,
-`--vram-lru` (misses take the layer's least-recently-used VRAM slot), `--arena-skip-resident` (the VRAM-seeded
-experts stay out of the RAM arena), `--prefill-chunk N` / `--chunk-mmq` / `--chunk-prestage` (prefill),
-`--prune F` / `--prune-penalty X` / `--saliency F` / `--arena-adapt` (adaptive expert pruning, see above),
-`--comp-type f32|q8_0|q5_0|q4_0|iq4_nl` / `--icomp-q8` / `--comp-rot 0|1` / `--comp-host` (compressed KV cache,
-see above), `--pos-offset N` (decode-timing probe at a deep position, no prefill), `--route-bias D` and
-`--skip-miss T` (lossy, see below), `--mtp FILE [--verify]` (DeepSeek-V4's MTP draft head:
-63% acceptance measured; `--verify` is CPU-tested, not yet tuned on CUDA, and chunked prefill does not fill the MTP
-window yet), `--ppl` (perplexity of the prompt), `--dump-logits`, `--temp`, `--ctx`.
+```bash
+python tools/glm/serve/serve_glm.py --engine strata --config tools/glm/serve/strata-glm-maya-abl-512k.json --port 8144
+```
 
-### Cache-aware routing (`--route-bias`, lossy, off by default)
-Adds `D` to the router's *selection* score of experts already in VRAM (the mixing weights stay exact), so near-ties
-resolve toward the cache. It trades quality for speed - measured: 0.05 → +9% decode / +1.1% perplexity, 0.2 → +29% /
-+9.6%. Leave it at 0 unless you have measured it on your own workload.
-`--skip-miss T` drops a routed expert that is a VRAM miss and weighs less than T of the token's routing weight
-(0.05: ~0.4% of lookups, within run-to-run noise; 0.10: 23.8 tok/s vs 22.3-23.4 for the reference runs, +5% perplexity
-- not recommended).
+Configs in [`tools/glm/serve/`](tools/glm/serve/):
+
+| config | model | context | port |
+|---|---|---|---|
+| `strata-glm-maya-abl-512k.json` (default) | Maya-S-v2 + LoRA | 512K | 8144 |
+| `strata-glm-maya-abl-300k.json` | Maya-S-v2 + LoRA | 300K | 8143 |
+| `strata-glm-maya-stock-512k.json` | Maya-S-v2, stock | 512K | 8145 |
+
+`strata-glm-quetza.wrapper` starts the server and puts the QuetzaCodetl agent in front of it
+(`--maya300`, `--stock`). The engine runs under `tools/ds4/memguard.sh`: a cgroup with a hard RAM cap and swap off,
+so a misconfiguration kills the process instead of freezing the desktop. Startup reads and pins the 64 GiB arena,
+which takes a few minutes. `glm_generate --help` lists every flag.
 
 ## Verifying it
 
-- `test_ds4_dense` - the dense half vs a CPU reference forward (`ds4_ref`) on small synthetic models: bit-exact on the
-  CPU backend; `--cuda` agrees to ~1e-4 (CUDA vs CPU arithmetic).
-- `test_ds4_moe` / `test_ds4_moe_gpu --gpu` - the expert tier on real expert slices vs a dequantised F32 reference,
-  every source (VRAM slot, prefetch, PCIe, CPU, file), the SwiGLU clamp forced on, and multi-token runs.
-- `tools/ds4/compare_logits.py` - the engine's logits vs llama.cpp goldens.
-- `DS4_CHECK_GPU=1` recomputes every GPU-computed expert on the CPU and logs the difference; `DS4_CHECK_LRU=1`
-  byte-checks every VRAM-LRU swap against the file.
-- Chunked prefill is bit-identical to the one-token decode loop on the CPU backend (logits of every prompt position,
-  chunks of 1-70 tokens; `DS4_CPU_FA_REF=1` for >= 64-token chunks, whose flash-attention otherwise tiles), and every
-  speed change above was checked the same way and mutation-tested (break it on purpose, the gate must fail).
+- Dense half vs a CPU reference on a mini fixture (`tools/glm/make_mini_glm.py`). The expert tier has the DS4 gates
+  (`test_ds4_moe*`) against dequantised F32 references.
+- First-token logits checked against the reference llama.cpp GLM fork. LoRA on/off parity on every expert path.
+- `--ppl` for perplexity. Use `--skip-miss 0 --skip-file 0` to get exact math.
+- `tools/glm/nsys_decode_anatomy.py` reads an nsys trace and reports per-token kernel time vs copy-engine time.
 
 ## Roadmap
 
-- **MTP verification on CUDA**: the head drafts at 63% acceptance here (74-93% reported elsewhere); at that rate
-  depth 1 is worth ~+10%, deeper drafts lose (each costs ~9 ms and more expert reads).
-- Long-context decode on a real document (the probe numbers above are an upper bound): the expert hit rate falls to
-  53-63% on long documents; a cross-layer expert cache is the candidate fix.
-- The dense half's ~4,500 small kernels per token (attention+router is ~15.5 ms against a ~6 ms weight-read floor).
-  In progress: 2026-10-09 cut a CSA layer from 121 to ~107 kernels per token (161 -> 130 when a block completes;
-  attention+router 16.5 -> 16.0 ms in the first A/B), all bit-exact on the CPU gates; an nsys profile decides what
-  is kernel time and what is launch gaps.
-- DSpark (0731's native 5-token drafter) and n-gram drafting on the same verification path.
-- A server (OpenAI-compatible) and a merge back into a single multi-model Strata; a MiMo-V2.6-Flash engine is next.
+- More decode, each lever small: a bigger arena when RAM allows (+~6%), F16 router/mHC, elementwise fusion
+  (~5 ms/token of tiny kernels), a faster CPU pool so `--pcie auto` can take misses off the saturated bus, and
+  prefetching further ahead.
+- Find out why the q5_k requant is worse than q4_k on chat (per-tensor bisect).
+- Coding, agentic and coherence benchmarks through the served API.
+- Fast start: serve off the mmap'd file while the arena builds in the background.
 
 ## Credits
 
-Built on [Strata](https://github.com/Niko1221/Strata) by Niko1221 and contributors (MIT). Uses
-[ggml / llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT), including its DeepSeek-V4 hyper-connection kernels,
-as the reference implementation. DeepSeek-V4-Flash by [DeepSeek](https://huggingface.co/deepseek-ai). The engine's
-design notes and every measurement behind the numbers above are in [docs/ds4/](docs/ds4/) (`FINDINGS.md`).
+Built on [Strata](https://github.com/Niko1221/Strata) by Niko1221 and contributors (MIT). Uses ggml / llama.cpp (MIT).
+Reference GLM-5.3 implementation from neurall's llama.cpp fork. GLM-5.3-Flash by Z.ai; Maya-S-v2 quantisation by
+peasantsmith; abliteration LoRA by GCSA AiLab (Abliterix). Design notes and every measurement are in
+[`docs/glm/`](docs/glm/).
 
 License: MIT (see [LICENSE](LICENSE)).
