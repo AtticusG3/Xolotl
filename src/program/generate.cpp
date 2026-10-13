@@ -10135,6 +10135,10 @@ int main(int argc, char** argv) {
             int req_penalty_last_n = 0;
             std::string req_bias_text;
             bool req_bias_present = false;
+            // local (Indra's Mirror, /v1/decide): score=ID,ID,... prints `SCORE <id>:<logprob> ... top=<id>:<logprob>`
+            // before the first token goes out: the log-softmax of the raw logits (no bias, no temperature) that pick the
+            // request's first generated token, so a client can compare options (listen / speak) by their probability
+            std::string req_score_text;
             int req_cvec = 1;   // cvec=0|1: a loaded control vector for this request (on when absent)
             // ckpt=0: a one-shot call whose turn no later request extends.  No checkpoint at its last turn boundary
             // (so no split there) nor every --prompt-cache-every tokens, and its session is neither continued nor
@@ -10163,6 +10167,7 @@ int main(int argc, char** argv) {
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
                     if (key == "logit_bias") { req_bias_text = tok.substr(eq + 1); req_bias_present = true; }
+                    else if (key == "score") req_score_text = tok.substr(eq + 1);
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
@@ -10187,6 +10192,21 @@ int main(int argc, char** argv) {
                 !strata::core::parse_logit_bias(req_bias_text, (int) n_vocab, req_bias, bias_error))) {
                 std::printf("ERR logit_bias: %s\n", o.batch > 0 ? "continuous batching is not supported" : bias_error.c_str());
                 continue;
+            }
+            std::vector<int64_t> req_score;
+            if (!req_score_text.empty()) {
+                std::string score_error;
+                if (o.batch > 0 || !parse_i64_list(req_score_text.c_str(), req_score, score_error) || req_score.size() > 64) {
+                    std::printf("ERR score: %s\n", o.batch > 0 ? "continuous batching is not supported"
+                                : req_score.size() > 64 ? "at most 64 token ids" : score_error.c_str());
+                    continue;
+                }
+                bool in_vocab = true;
+                for (const int64_t id : req_score) in_vocab = in_vocab && id < (int64_t) n_vocab;
+                if (!in_vocab) {
+                    std::printf("ERR score: a token id outside the vocabulary\n");
+                    continue;
+                }
             }
             std::string emb_path;
             if (geni && endp != nullptr) {
@@ -11313,6 +11333,7 @@ int main(int argc, char** argv) {
             bool pl_ran = false;
             const bool pl_want = pipe && pl_pw >= 2 && pl_snap_ok;
             const char* pl_serial = !pl_want ? nullptr
+                                  : !req_score.empty() ? "score= (local /v1/decide)"
                                   : hist_n > 0 ? "repetition penalties (penalty_last_n)"
                                   : mtp.coupled() ? "coupled draft sampling" : nullptr;
             if (pl_serial != nullptr) {   // said once per reason
@@ -12053,6 +12074,29 @@ int main(int argc, char** argv) {
                 if (aflipped) apply_pending(true);   // 0.1.43: every layer's copies were waited for in the window; the bookkeeping now
                 // Diagnostics (as in generate): STRATA_DUMP_FIRST_LOGITS=<path> writes the logits of each request's first
                 // window to <path>.<n>, so the prompt paths (a peer card's share, a split) can be compared by KL
+                if (first_window && !req_score.empty()) {   // local: score= (row 0 = the first generated token's logits)
+                    std::vector<float> row((size_t) ver.vocab());
+                    if (!ver.copy_logits(0, row.data())) {
+                        std::printf("ERR score: the logits copy failed\n");
+                        return 1;
+                    }
+                    int64_t top = 0;
+                    for (int64_t v = 1; v < (int64_t) row.size(); ++v)
+                        if (row[(size_t) v] > row[(size_t) top]) top = v;
+                    double sum = 0.0;
+                    for (const float l : row) sum += std::exp((double) l - (double) row[(size_t) top]);
+                    const double lse = (double) row[(size_t) top] + std::log(sum);
+                    std::string line = "SCORE";
+                    char b[64];
+                    for (const int64_t id : req_score) {
+                        std::snprintf(b, sizeof b, " %lld:%.6f", (long long) id, (double) row[(size_t) id] - lse);
+                        line += b;
+                    }
+                    std::snprintf(b, sizeof b, " top=%lld:%.6f", (long long) top, (double) row[(size_t) top] - lse);
+                    line += b;
+                    std::printf("%s\n", line.c_str());
+                    std::fflush(stdout);
+                }
                 if (first_window) {
                     static const char* fl = std::getenv("STRATA_DUMP_FIRST_LOGITS");
                     static int fl_n = 0;

@@ -614,6 +614,67 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
 
+def parse_score_line(line: str) -> dict:
+    """local (/v1/decide): the engine's `SCORE <id>:<logprob> ... top=<id>:<logprob>` -> {"ids": {id: lp}, "top": (id, lp)}."""
+    ids, top = {}, None
+    for f in line.split()[1:]:
+        key, _, rest = f.partition("=")
+        tid, _, lp = (rest if key == "top" else f).partition(":")
+        try:
+            if key == "top":
+                top = (int(tid), float(lp))
+            else:
+                ids[int(tid)] = float(lp)
+        except ValueError:
+            continue
+    return {"ids": ids, "top": top}
+
+
+DECIDE_MAX_OPTIONS = 16
+
+
+def decide_option_tokens(tok, options: list) -> list[int]:
+    """local (/v1/decide): each option's first token, as it starts an answer (no leading space: the answer follows the
+    template's newline).  The options must differ in their first token - the decision is that one token."""
+    if not isinstance(options, list) or not 2 <= len(options) <= DECIDE_MAX_OPTIONS or \
+            not all(isinstance(o, str) and o.strip() for o in options):
+        raise ValueError(f"options: a list of 2..{DECIDE_MAX_OPTIONS} non-empty strings")
+    firsts = []
+    for o in options:
+        ids = tok.encode(o, parse_special=False)
+        if not ids:
+            raise ValueError(f"options: {o!r} has no tokens")
+        firsts.append(int(ids[0]))
+    if len(set(firsts)) != len(firsts):
+        clash = [o for o, t in zip(options, firsts) if firsts.count(t) > 1]
+        raise ValueError(f"options: {clash} start with the same token; pick options whose first words differ "
+                         "(e.g. WAIT / RESPOND)")
+    return firsts
+
+
+def decide_result(options: list, firsts: list[int], scored: dict, bias: dict | None) -> dict:
+    """local (/v1/decide): the choice from the options' first-token log-probs.  `bias` {option: log-odds} is added before
+    the pick (a threshold: {"WAIT": 0.85} picks WAIT when p(WAIT) >= ~0.3 against one other option)."""
+    import math
+    lps = [scored["ids"].get(t) for t in firsts]
+    if any(lp is None for lp in lps):
+        raise ValueError("the engine returned no score for the options (an engine without score= support?)")
+    bias = bias or {}
+    for k, v in bias.items():
+        if k not in options or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError("bias: {option: number} for options in the list")
+    adj = [lp + float(bias.get(o, 0.0)) for o, lp in zip(options, lps)]
+    m = max(lps)
+    z = sum(math.exp(lp - m) for lp in lps)
+    best = max(range(len(options)), key=lambda i: adj[i])
+    return {"choice": options[best], "index": best,
+            "probs": {o: round(math.exp(lp - m) / z, 6) for o, lp in zip(options, lps)},
+            "logprobs": {o: round(lp, 6) for o, lp in zip(options, lps)},
+            # the probability mass the model put on any option at all (low: it wanted to say something else)
+            "coverage": round(sum(math.exp(lp) for lp in lps), 6),
+            "top_token": {"id": scored["top"][0], "logprob": round(scored["top"][1], 6)} if scored.get("top") else None}
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1046,6 +1107,10 @@ class StrataEngine:
             pn = prefix.get("tokens")
             if isinstance(pn, int) and not isinstance(pn, bool) and pn > 0:
                 keys += f" pin={pn}"
+        score = sampling.get("strata_score")             # local (/v1/decide): the first token's log-probs of these ids
+        if isinstance(score, list) and score and all(isinstance(t, int) and not isinstance(t, bool) and t >= 0
+                                                     for t in score):
+            keys += " score=" + ",".join(str(t) for t in score)
         return keys + StrataEngine.projection_key(sampling) + bias_api.engine_key(sampling.get("logit_bias"))
 
     @staticmethod
@@ -1753,6 +1818,11 @@ class StrataEngine:
                 beat = heard
                 if stall_state:
                     stall_state.clear()
+                if line.startswith("SCORE"):              # local (/v1/decide): SCORE id:lp ... top=id:lp
+                    out = (sampling or {}).get("strata_score_out")
+                    if isinstance(out, dict):
+                        out.update(parse_score_line(line))
+                    continue
                 if line.startswith("T "):
                     allow = silence
                     if cancel.is_set():
@@ -5305,6 +5375,8 @@ def make_handler(svc: Service):
                     self._json(code, body)
                 elif path == "/v1/chat/completions":
                     self._openai(req)
+                elif path == "/v1/decide":                   # local: one-token decisions (voice turn-taking)
+                    self._decide(req)
                 elif path == "/v1/messages":
                     self._anthropic(req)
                 elif path == "/v1/messages/count_tokens":
@@ -5562,6 +5634,45 @@ def make_handler(svc: Service):
                     yield item
             finally:
                 items.close()
+
+        def _decide(self, req):
+            """local (Indra's Mirror) POST /v1/decide {"messages": [...], "options": ["WAIT", "RESPOND"],
+            "bias": {"WAIT": 0.85}, "keep": false}: the chat prompt with thinking off, and the first answer token's
+            log-probs of each option's first token (the engine's score= key) - no text is written.  -> {"choice",
+            "index", "probs" (over the options), "logprobs", "coverage", "top_token", "prompt_tokens", "ms"}.
+            `keep`: checkpoint the decision's session so the next call that extends it (a longer transcript) reuses it;
+            off by default, so a side decision leaves the conversation cache to the conversations."""
+            t0 = time.perf_counter()
+            if getattr(svc.engine, "batch", 0):
+                raise ValueError("/v1/decide: not supported with continuous batching (--batch)")
+            options = req.get("options")
+            firsts = decide_option_tokens(svc.tok, options)
+            scored: dict = {}
+            sub = {"messages": req.get("messages"), "max_tokens": 1, "temperature": 0,
+                   "chat_template_kwargs": {"enable_thinking": False},
+                   "strata_score": firsts, "strata_score_out": scored}
+            if not req.get("keep"):
+                sub["strata_checkpoint"] = False
+            messages, _tools, kw = openai_to_messages(sub)
+            self._no_local_images(messages)
+            svc.load()
+            cancel = threading.Event()
+            self._watch_client(cancel)
+            ids, thinking, _ = svc.prepare(messages, None, kw, 1, req=sub, cancel=cancel)
+            for _item in svc.run(ids, thinking, None, 1, sub, cancel):
+                pass
+            if cancel.is_set():
+                return
+            out = decide_result(options, firsts, scored, req.get("bias"))
+            if out.get("top_token"):
+                try:
+                    out["top_token"]["text"] = svc.tok.decode([out["top_token"]["id"]])
+                except Exception:
+                    pass
+            last = getattr(svc.engine, "last", {}) or {}
+            out.update(prompt_tokens=len(ids), reused_tokens=last.get("reused"),
+                       prompt_ms=last.get("prompt_ms"), ms=round((time.perf_counter() - t0) * 1000.0, 1))
+            self._json(200, out)
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
