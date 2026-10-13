@@ -1004,17 +1004,16 @@ const MmqPlan& mmq_plan() {
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42, dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
             // #420: a tile on every GPU for these shapes (gate+up: 1280 rows, down: N rows), else the FP16 path
-<<<<<<< HEAD
             if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) {
                 p.fallback = true;
                 // the fused path's buffers (Xq, H) exist for it; a chunk it does not take (a small one) keeps the FP16 path
                 if (on && lay.native && fused::native_supported(gt, dt)) { p.fo[(size_t) l] = 1; p.any = true; }
-=======
-            if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) { p.fallback = true; continue; }
-            else if (!mmq::supported(gt) || !mmq::supported(dt)) {
+                continue;
+            }
+            if (!mmq::supported(gt) || !mmq::supported(dt)) {
                 p.fallback = true;
                 if (!blocked++) { blocked_gt = gt; blocked_dt = dt; }
->>>>>>> 5fee8ea (Fixing conflics)
+
                 continue;
             }
             p.layer[(size_t) l] = 1;
