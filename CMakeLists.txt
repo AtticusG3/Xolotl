@@ -1701,7 +1701,14 @@ endif()
 # tools/v41/engine/v41_engine.cmake, so GLM's explicit copies of those three were DROPPED for the merge:
 # including them twice created duplicate targets (ds4_generate, ds4_mtp_bench) and failed the configure.
 # glm.cmake is NOT in fork.cmake, so it stays - the GLM engine needs it to build at all.
-include(${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/cmake/glm.cmake OPTIONAL)
+#
+# ORDER MATTERS (xolotl): fork.cmake must come FIRST - it is what creates ds4_moe_cuda/ds4_moe_cpu, and
+# glm.cmake's own contract is "include()d (OPTIONAL) at the end of the root CMakeLists.txt, AFTER the tools/ds4
+# slices it builds on".  With glm.cmake first, `if(TARGET ds4_moe_cuda)` was false and neither glm_generate nor
+# glm_generate_cpu was ever created: the merged tree built the DS4 and DSV4.1 engines and silently no GLM engine.
 
 # Strata-DS4 fork targets (docs/UPSTREAM_SYNC.md)
 include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/fork.cmake OPTIONAL)
+
+# the GLM-5.3-Flash engine (GlmDense + the shared Ds4MoeTier) - needs the ds4 slices above
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/cmake/glm.cmake OPTIONAL)
