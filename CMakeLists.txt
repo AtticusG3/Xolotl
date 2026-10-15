@@ -1511,23 +1511,9 @@ if(STRATA_NATIVE_EXPERTS)
     target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
     if(NOT STRATA_HIP_GFX906)
-      # DS4 phase 2 gate: one real DeepSeek-V4 expert (gate/up IQ2_XXS, down Q2_K) through the CPU pool and the
-      # GPU native MMVQ path, against ggml's dequantizer + an F32 matmul.  The 0731 artifact comes from
-      # argv[1]/$DS4_GGUF; without it the binary prints "skipped" and exits 0.  --cpu-only runs no CUDA.
-      add_executable(ds4_expert_parity src/kernels/ds4_expert_parity.cpp)
-      target_include_directories(ds4_expert_parity PRIVATE ${_strata_gpu_include_directories})
-      target_link_libraries(ds4_expert_parity PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
-      if(STRATA_BUILD_TESTS)
-        add_test(NAME ds4_expert_parity COMMAND ds4_expert_parity "$ENV{DS4_GGUF}")
-      endif()
-      # DS4 phase 4a: the DeepSeek-V4 expert engine replayed on recorded routes (tools/ds4/moe_replay.cpp).
-      # It links the real machinery - strata_engine's ExpertCache, the CPU ExpertPool, the native grouped
-      # kernels, PinnedArena - and drives them from ds4routes.bin.  --correctness --cpu-only needs no GPU.
-      add_executable(ds4_moe_replay tools/ds4/moe_replay.cpp tools/ds4/moe_gap.cu)
-      target_include_directories(ds4_moe_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${_strata_gpu_include_directories})
-      target_link_libraries(ds4_moe_replay PRIVATE strata_engine strata_kernels strata_kernels_cpu strata_artifact
-        ${_strata_gpu_runtime_target})
+      # xolotl: ds4_expert_parity and ds4_moe_replay are defined in tools/ds4/cmake/fork.cmake (28 and 36) -
+      # the fork moved them there.  GLM's branch still carried these inline copies, so the merge created
+      # DUPLICATE TARGETS and the configure failed.  Removed here; fork.cmake is the single home for both.
     endif()
     if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)
       # Unsloth UD-Q4_K_XL's three expert pairs (and Q8_0 alone, its embedding) on synthetic ggml-quantized weights
@@ -1694,21 +1680,11 @@ if(STRATA_HIP_GFX906)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
 
-# ---- ds4 reference forward pass (Phase 3) ----  UNION (xolotl): GLM's slice of this block
-# tools/ds4 is not part of the engine, but ds4_ref is the Phase-3 correctness oracle: a plain CPU ggml
-# graph that emits golden_dump-format activations for tools/ds4/compare_golden.py.  CPU-only, no CUDA.
-if(TARGET ggml-cpu)
-  add_executable(ds4_ref tools/ds4/ds4_ref.cpp)
-  target_include_directories(ds4_ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(ds4_ref PRIVATE ggml ggml-cpu ggml-base)
-endif()
-
-# ---- ds4 decode engine (Phase 4b proper) ---------------------------------
-# Each engine slice owns exactly one of these files (conductor plan 2026-10-06); OPTIONAL so a missing one is fine.
-# tools/glm/cmake/glm.cmake is the GLM engine slice - required for the GLM model to build at all.
-include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_dense.cmake OPTIONAL)
-include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_moe.cmake OPTIONAL)
-include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_engine.cmake OPTIONAL)
+# ---- engine slices (xolotl) ----------------------------------------------
+# fork.cmake (below) already includes tools/ds4/cmake/{ds4_dense,ds4_moe,ds4_engine}.cmake AND
+# tools/v41/engine/v41_engine.cmake, so GLM's explicit copies of those three were DROPPED for the merge:
+# including them twice created duplicate targets (ds4_generate, ds4_mtp_bench) and failed the configure.
+# glm.cmake is NOT in fork.cmake, so it stays - the GLM engine needs it to build at all.
 include(${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/cmake/glm.cmake OPTIONAL)
 
 # Strata-DS4 fork targets (docs/UPSTREAM_SYNC.md)
