@@ -787,18 +787,35 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         const auto a = std::chrono::steady_clock::now();
         run_phase(5, mtasks_);
         const auto b = std::chrono::steady_clock::now();
+        // UNION (xolotl): the fork's per-expert `fmt` (DS4.1 mixed tiers) AND GLM's LoRA a.h accumulation, which
+        // must run on the float SwiGLU row BEFORE it is quantized.  fd is the per-expert format when set, else the batch's.
         for (int e = 0; e < nb; ++e) {
             const NativeFmt& fd = mjobs_[e].fmt ? *mjobs_[e].fmt : f;
-            for (int t = 0; t < mjobs_[e].nt; ++t)
+            for (int t = 0; t < mjobs_[e].nt; ++t) {
+                if (mjobs_[e].lora_a) {   // the LoRA's a . h on the float SwiGLU row, before it is quantized
+                    const float* hh = split_multi_[(size_t) e].ff[t];
+                    const float* la = mjobs_[e].lora_a;
+                    float s = 0.f;
+                    for (int64_t i = 0; i < fd.n_ff; ++i) s += la[i] * hh[i];
+                    mjobs_[e].lora_s[t] = s;
+                }
                 if (q2_native_kernels(fd.d_type)) act_quant_any(split_multi_[(size_t) e].ff[t], (int) fd.n_ff, split_multi_[(size_t) e].a2[t]);
                 else native_quant_h(fd, split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].hq[t]);
+            }
         }
-
         const auto c = std::chrono::steady_clock::now();
         mper_ = f.n_embd;
         mrows_ = (int64_t) nb * f.n_embd;
         mtasks_ = phase_tasks(mrows_);
         run_phase(6, mtasks_);
+        for (int e = 0; e < nb; ++e)   // the LoRA's down delta, after the down product wrote `out`
+            if (mjobs_[e].lora_a && mjobs_[e].lora_b)
+                for (int t = 0; t < mjobs_[e].nt; ++t) {
+                    float* o = mjobs_[e].out[t];
+                    const float s = mjobs_[e].lora_s[t];
+                    const float* lb = mjobs_[e].lora_b;
+                    if (o) for (int64_t j = 0; j < f.n_embd; ++j) o[j] += s * lb[j];
+                }
         const auto d = std::chrono::steady_clock::now();
         ms_multi_gu += std::chrono::duration<double, std::milli>(b - a).count();
         ms_multi_q += std::chrono::duration<double, std::milli>(c - b).count();

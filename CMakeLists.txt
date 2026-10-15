@@ -262,6 +262,11 @@ if(STRATA_BUILD_TESTS)
   add_executable(batch_read_test tests/program/batch_read_test.cpp)
   target_include_directories(batch_read_test PRIVATE include)
   add_test(NAME batch_read_test COMMAND batch_read_test)
+  # UNION (xolotl): upstream's batch_read_test (above) and GLM's ds4 geometry test (below) are independent targets
+  # DSV4 geometry + full tensor map (header mmap only; the real-file part skips without $DS4_GGUF/argv[1])
+  add_executable(ds4_geometry_test tests/core/ds4_geometry_test.cpp)
+  target_link_libraries(ds4_geometry_test PRIVATE strata_artifact)
+  add_test(NAME ds4_geometry_test COMMAND ds4_geometry_test $ENV{DS4_GGUF})
 
   # the hipBLASLt tuning header's architecture gate: RDNA4 siblings share solution IDs, RDNA3 siblings share
   # theirs, cross-family pairs and version mismatches stay rejected (synthetic tables: no model, no GPU)
@@ -1227,6 +1232,8 @@ if(STRATA_NATIVE_EXPERTS)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(GGML_STATIC ON CACHE BOOL "" FORCE)
   set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+  # xolotl: tools/ds4/cmake/ggml_cuda.cmake is the fork's canonical form of this block (option STRATA_GGML_CUDA,
+  # GGML_CUDA ON + GGML_CUDA_GRAPHS ON under it).  GLM's inline copy of the same block is a duplicate - dropped.
   include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ggml_cuda.cmake OPTIONAL)   # fork: STRATA_GGML_CUDA
   set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
@@ -1375,6 +1382,8 @@ if(STRATA_NATIVE_EXPERTS)
     # follows eddoursul/Strata 7706c1b); q6_k is HIP only
     set(_strata_mmq_cuda_types ${_strata_mmq_types})
     if(STRATA_MMQ_KQUANTS)
+      # xolotl: the fork and GLM both added q2_k/q3_k/mxfp4 here for the SAME reason (MiMo/DS4 GSQ-RCO experts;
+      # without them the dispatch cases in moe_mmq.cu fail to link).  Kept as the fork's two appends.
       list(APPEND _strata_mmq_cuda_types q4_k q5_k q5_1)
       list(APPEND _strata_mmq_cuda_types q2_k q3_k mxfp4)   # fork: DS4 Q2_K / MiMo Q3_K, MXFP4 experts
       if(STRATA_Q6K_EXPERTS OR STRATA_HIP_GFX906)   # UD-Q6_K_XL gate/up (docs/UNSLOTH_Q6.md),
@@ -1501,6 +1510,25 @@ if(STRATA_NATIVE_EXPERTS)
     add_executable(native_expert_bench src/kernels/native_expert_bench.cpp)
     target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
+    if(NOT STRATA_HIP_GFX906)
+      # DS4 phase 2 gate: one real DeepSeek-V4 expert (gate/up IQ2_XXS, down Q2_K) through the CPU pool and the
+      # GPU native MMVQ path, against ggml's dequantizer + an F32 matmul.  The 0731 artifact comes from
+      # argv[1]/$DS4_GGUF; without it the binary prints "skipped" and exits 0.  --cpu-only runs no CUDA.
+      add_executable(ds4_expert_parity src/kernels/ds4_expert_parity.cpp)
+      target_include_directories(ds4_expert_parity PRIVATE ${_strata_gpu_include_directories})
+      target_link_libraries(ds4_expert_parity PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
+      if(STRATA_BUILD_TESTS)
+        add_test(NAME ds4_expert_parity COMMAND ds4_expert_parity "$ENV{DS4_GGUF}")
+      endif()
+      # DS4 phase 4a: the DeepSeek-V4 expert engine replayed on recorded routes (tools/ds4/moe_replay.cpp).
+      # It links the real machinery - strata_engine's ExpertCache, the CPU ExpertPool, the native grouped
+      # kernels, PinnedArena - and drives them from ds4routes.bin.  --correctness --cpu-only needs no GPU.
+      add_executable(ds4_moe_replay tools/ds4/moe_replay.cpp tools/ds4/moe_gap.cu)
+      target_include_directories(ds4_moe_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${_strata_gpu_include_directories})
+      target_link_libraries(ds4_moe_replay PRIVATE strata_engine strata_kernels strata_kernels_cpu strata_artifact
+        ${_strata_gpu_runtime_target})
+    endif()
     if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)
       # Unsloth UD-Q4_K_XL's three expert pairs (and Q8_0 alone, its embedding) on synthetic ggml-quantized weights
       # at 2560/640: GPU and CPU experts against the float reference, GPU dequantizers against to_float.
@@ -1665,6 +1693,23 @@ if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
+
+# ---- ds4 reference forward pass (Phase 3) ----  UNION (xolotl): GLM's slice of this block
+# tools/ds4 is not part of the engine, but ds4_ref is the Phase-3 correctness oracle: a plain CPU ggml
+# graph that emits golden_dump-format activations for tools/ds4/compare_golden.py.  CPU-only, no CUDA.
+if(TARGET ggml-cpu)
+  add_executable(ds4_ref tools/ds4/ds4_ref.cpp)
+  target_include_directories(ds4_ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(ds4_ref PRIVATE ggml ggml-cpu ggml-base)
+endif()
+
+# ---- ds4 decode engine (Phase 4b proper) ---------------------------------
+# Each engine slice owns exactly one of these files (conductor plan 2026-10-06); OPTIONAL so a missing one is fine.
+# tools/glm/cmake/glm.cmake is the GLM engine slice - required for the GLM model to build at all.
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_dense.cmake OPTIONAL)
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_moe.cmake OPTIONAL)
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/ds4_engine.cmake OPTIONAL)
+include(${CMAKE_CURRENT_SOURCE_DIR}/tools/glm/cmake/glm.cmake OPTIONAL)
 
 # Strata-DS4 fork targets (docs/UPSTREAM_SYNC.md)
 include(${CMAKE_CURRENT_SOURCE_DIR}/tools/ds4/cmake/fork.cmake OPTIONAL)
