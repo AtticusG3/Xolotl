@@ -140,6 +140,29 @@ real parents, but a later `merge-base` would see unrelated histories again unles
 (`git filter-repo --replace-refs` / a re-rooted import) or the merge is done as an explicit
 `--allow-unrelated-histories` content merge. Decide before pushing.
 
+### GOTCHA, found the hard way (2026-10-16): the graft creates a CRISS-CROSS
+
+Once the graft is in place, `git merge-base --all xolotl glm` returns **TWO** bases (`fb58e0db` **and**
+`a6935457`). Git then synthesises a *virtual* merge base by merging the two, and **that virtual base can itself
+contain conflict markers** — verified: the stage-1 blob of `serve/server.py` literally contained
+`<<<<<<<<< Temporary merge branch 1`. The result is **spurious conflicts on files glm never touched** (the plain
+merge of glm reported **51** conflicts, including all of `serve/` where `git diff fb58e0db origin/glm -- serve/`
+is *empty*).
+
+**Fix:** the intra-fork merges (`glm`, `mimo`) do NOT need the graft — their single base is `fb58e0db`. Merge them
+with a single-base strategy:
+
+```bash
+git merge --no-commit --no-ff -s resolve origin/glm   # 13 conflicts, not 51 - the real set
+```
+
+**Better, and the recommended order (supersedes §9):** do the intra-fork merges **first**, on plain `deepseek4`
+(no graft in play), and apply the graft + the cross-lineage merge **last**. Stacking the upstream merge on top of
+the graft first, as this branch currently does, makes every later merge pay the criss-cross tax.
+
+`git -c core.useReplaceRefs=false` does **not** avoid it — the second base comes from the merged upstream parent,
+not from the replace ref alone.
+
 ## 5. The three hard parts
 
 1. **`src/kernels/*` — the quantisation kernels.** Both branches optimised the same IQ/MMVQ kernels for their
