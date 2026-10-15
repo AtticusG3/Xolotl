@@ -1390,10 +1390,16 @@ if(STRATA_NATIVE_EXPERTS)
         list(APPEND _strata_mmq_cuda_types q6_k)    #   and gfx906: moe_mmq.cu calls it under __HIPCC__
       endif()
     endif()
+    # xolotl: moe_mmq.cu includes the GENERATED strata/prefill/mmq_types.inc, but neither the fork's nor the
+    # dense lineage's CMakeLists included cmake/mmq_types.cmake or called the generator - the wiring was lost in
+    # the merge and the file has never existed in git.  Generate it from the CUDA type list into the build tree.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mmq_types.cmake)
+    strata_gen_mmq_types(${CMAKE_CURRENT_BINARY_DIR}/strata/prefill/mmq_types.inc "${_strata_mmq_cuda_types}")
     foreach(_t IN LISTS _strata_mmq_cuda_types)
       target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
     target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                               ${CMAKE_CURRENT_BINARY_DIR}
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
     if(MSVC)

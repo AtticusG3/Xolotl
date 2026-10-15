@@ -158,7 +158,9 @@ bool supported(int t) {
         case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K:   // Unsloth's UD-Q4_K_XL experts and the dense weights
 #endif
 #ifdef STRATA_MMQ_KQUANTS
-        case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q5_1:   // Unsloth's UD-Q4_K_XL experts (CUDA)
+        // xolotl: Q4_K/Q5_K are already listed by the block above (KQUANTS || DENSE_TYPES) and Q5_1 by line 156,
+        // so repeating them here made DUPLICATE case labels ("case label value has already appeared in this
+        // switch at line 158") and failed the build.  This block now contributes only the fork's MiMo/DS4 adds.
         case GGML_TYPE_Q2_K: case GGML_TYPE_Q3_K:   // MiMo-V2.6-Flash RL GSQ-RCO experts are Q2_K/Q3_K (2/3-bit K-quants)
         case GGML_TYPE_MXFP4:                       // ...and its MXFP4 expert outliers
 #if defined(__HIPCC__) || defined(STRATA_Q6K_EXPERTS)
