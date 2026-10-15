@@ -63,31 +63,6 @@ QWEN35_PATTERN = (
     r"|\s+"
 )
 
-# The `joyai-llm` pre-tokenizer (DeepSeek-V4-Flash and the DeepSeek3/Hunyuan family), transcribed from
-# `.ref/llama.cpp src/llama-vocab.cpp` L320-326 (`case LLAMA_VOCAB_PRE_TYPE_JOYAI_LLM`).  UNLIKE qwen35 this is
-# THREE regexes, and llama.cpp APPLIES THEM SEQUENTIALLY: each one further splits the pieces the previous one
-# left (`unicode_regex_split` at `unicode.cpp:1291-1367` feeds the accumulating `bpe_offsets` into the next).
-# The order is load-bearing.  `\p{N}{1,3}` must cut digit runs first (so `01234` is `012|34`); then
-# `[一-龥぀-ゟ゠-ヿ]+` pulls Han / kana runs out of a larger `\p{L}+` (so `abc漢字def` is `abc|漢字|def`); the
-# last pattern is the ordinary word splitter.  A single alternation of the three looks equivalent on ASCII and
-# is not: it keeps `abc漢字def` whole.
-JOYAI_LLM_PATTERNS = [
-    r"\p{N}{1,3}",
-    r"[一-龥぀-ゟ゠-ヿ]+",
-    (r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+"
-     r"|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+"
-     r"| ?[\p{P}\p{S}]+[\r\n]*"
-     r"|\s*[\r\n]+"
-     r"|\s+(?!\S)"
-     r"|\s+"),
-]
-
-# pre type -> the pattern list llama.cpp applies, in order.  The `pre` string in GGUF metadata selects it.
-PRE_PATTERNS = {
-    "qwen35": [QWEN35_PATTERN],
-    "joyai-llm": JOYAI_LLM_PATTERNS,
-}
-
 
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
@@ -111,10 +86,7 @@ class Tokenizer:
             if parts[0] not in self.ids or parts[1] not in self.ids:
                 raise ValueError("merge %d names a token outside the vocabulary: %r" % (i, m))
             self.ranks[(parts[0], parts[1])] = i
-        if pre not in PRE_PATTERNS:
-            raise ValueError("unknown pre-tokenizer %r (known: %s)"
-                             % (pre, ", ".join(sorted(PRE_PATTERNS))))
-        self._pre_res = [regex.compile(p) for p in PRE_PATTERNS[pre]]
+        self._re = regex.compile(QWEN35_PATTERN)
 
         # The literals matched directly instead of being run through BPE.  GGUF token types: 3 = CONTROL,
         # 4 = USER_DEFINED.  The two classes behave DIFFERENTLY and llama.cpp's own tokenizer settled which:
@@ -139,6 +111,10 @@ class Tokenizer:
         # token containing regex metacharacters (several do: `<|`, `[`, `(`) is matched literally.
         self._always_re = self._alt(always)
         self._special_re = self._alt(list(self.special_tokens))
+        # Initialize once, rather than allocating a default dict and looking it up
+        # through __dict__.setdefault on each encoded segment or decoded token.
+        self._piece_ids: dict[str, list[int]] = {}
+        self._bytes_cache: dict[int, bytes] = {}
 
     @staticmethod
     def _alt(literals: list[str]):
@@ -236,34 +212,14 @@ class Tokenizer:
                     heapq.heappush(heap, (r2, p, parts[p], parts[i]))
         return [s for s in parts if s is not None]
 
-    def _pre_split(self, text: str) -> list[str]:
-        """The pre-tokenizer pieces of `text`: each pattern in `_pre_res` splits the pieces the patterns before
-        it left, exactly as llama.cpp's `unicode_regex_split` refines `bpe_offsets` one regex at a time."""
-        spans = [(0, len(text))]
-        for pat in self._pre_res:
-            nxt: list[tuple[int, int]] = []
-            for a, b in spans:
-                sub = text[a:b]
-                last = 0
-                for m in pat.finditer(sub):
-                    if m.start() > last:
-                        nxt.append((a + last, a + m.start()))
-                    if m.end() > m.start():
-                        nxt.append((a + m.start(), a + m.end()))
-                    last = m.end()
-                if last < len(sub):
-                    nxt.append((a + last, b))
-            spans = nxt
-        return [text[a:b] for a, b in spans]
-
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered (an agent resends its whole history every turn)
 
     def _encode_plain(self, text: str) -> list[int]:
         out: list[int] = []
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again.  The ids are the ones _bpe gives: this only skips the work.
-        cache = self.__dict__.setdefault("_piece_ids", {})
-        for piece in self._pre_split(text):
+        cache = self._piece_ids
+        for piece in self._re.findall(text):
             got = cache.get(piece)
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))
@@ -290,11 +246,27 @@ class Tokenizer:
             return self._encode_plain(text)
         out: list[int] = []
         pos = 0
+        # Matches arrive in text order. For reusable span sequences, consume each
+        # span once instead of scanning the entire list for every literal match.
+        # Sorting a copy handles unsorted/overlapping input without mutating it.
+        # Other iterables keep the original consumption semantics below.
+        span_sequence = isinstance(plain, (list, tuple)) and bool(plain)
+        if span_sequence:
+            spans = iter(sorted(plain))
+            upcoming = next(spans, None)
+            plain_end = 0
         for m in pat.finditer(text):
-            if plain and any(a <= m.start() < b for a, b in plain):
+            start = m.start()
+            if span_sequence:
+                while upcoming is not None and upcoming[0] <= start:
+                    plain_end = max(plain_end, upcoming[1])
+                    upcoming = next(spans, None)
+                if start < plain_end:
+                    continue
+            elif plain and any(a <= start < b for a, b in plain):
                 continue
-            if m.start() > pos:
-                out.extend(self._encode_plain(text[pos:m.start()]))
+            if start > pos:
+                out.extend(self._encode_plain(text[pos:start]))
             out.append(self.special_tokens[m.group(0)])
             pos = m.end()
         if pos < len(text):
@@ -313,7 +285,7 @@ class Tokenizer:
 
     def token_bytes(self, i: int) -> bytes:
         """The raw bytes of one token (a multi-byte character can be split across tokens)."""
-        cache = self.__dict__.setdefault("_bytes_cache", {})
+        cache = self._bytes_cache
         b = cache.get(i)
         if b is None:
             if i < 0 or i >= len(self.tokens):

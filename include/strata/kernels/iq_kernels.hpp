@@ -73,6 +73,14 @@ void weighted_rows_sum(const float* parts, const float* w, int K, int64_t H, int
 /// tier's host loop bit for bit); w[k] == 0 skips row k.
 void decode_rows_sum(const float* parts, const float* w, int K, int64_t H, float* out, void* stream);
 
+/// A770 port (STRATA_PF_XMX=2): up to kXmxGroupMax experts' products in one XMX launch, the weights decoded from the
+/// quantized rows into local memory.  Expert i: Y_i[cnt[i]][N] = X_i . W_i^T (X FP16, Y FP32, rows back to back).
+/// gate/up: b != nullptr (a = gate, b = up rows of n_embd = K; the output's virtual rows interleave gate/up);
+/// down: b == nullptr, a = the [N][K] rows.  N a multiple of 128, K of 32 (and a whole number of rows per 256 block).
+constexpr int kXmxGroupMax = 16;
+void iq_xmx_grouped(int ty, const uint8_t* const* a, const uint8_t* const* b, const int32_t* cnt, int n,
+                    const uint16_t* X, float* Y, int N, int K, void* stream);
+
 /// Grouped experts in the native format: group g's blob at device address grp_ptr[g]; its entries
 /// [grp_start[g], grp_start[g+1]) read token ent_tok[e]'s q8_1 activation (n_embd/32 blocks per token in x_q8_1)
 /// and write row ent_dst[e] of `out` (n_embd floats).  Counts are read on the device.
