@@ -40,7 +40,7 @@ blocker for serving GLM-5.3 from this tree.
 | tests | **53/54 pass**; `ple_parity` fails on a missing model fixture (§7.2) |
 | open | §6: bug 11 (GLM tier init) **fixed + compiled green, runtime verification still owed** — one command |
 | pushed | **NOTHING**. Nothing pushed, no repo created, no wrapper repointed. |
-| disk | `/` at **97 %**, ~26 G free — the real constraint (why the clone is sparse, excludes `bench/`) |
+| disk | `/` at **98 %**, **~19 G free** (was 26 G before the §5 bug-8 MMQ instances + the bug-11 rebuild) — the real constraint (why the clone is sparse, excludes `bench/`) |
 | GPU | free. 778 MiB used, **no compute apps**. The only "GPU" process is Odin's embedding server, CPU-only (`-ngl 0`). |
 
 ---
@@ -448,8 +448,9 @@ b108d171 xolotl: complete the merge - LoRA overload, one MMQ list, the CPU tier 
    Only `git worktree prune` has been run (removed one dead `/tmp/strata-dense-eval` registration).
 3. **`pkill -f "<pattern>"` kills your own shell** when the pattern is in your command line (cost the
    previous session exit 144). Use `pkill -x ninja`.
-4. **Disk is at 97 % (26 G free).** The clone is sparse (excludes `bench/`) for this reason. Adding
-   MMQ instances (§5 bug 8) or a second build dir will eat it — watch `df -h /` before big builds.
+4. **Disk is at 98 % (~19 G free, down from 26 G).** The clone is sparse (excludes `bench/`) for this
+   reason. The bug-8 MMQ instances and the bug-11 rebuild cost ~7 G. Adding more instances, or a second
+   build dir, will eat it — watch `df -h /` before big builds.
 5. **`ninja` stops at the first error by default** — the HEADER of the error may be a *consequence*.
    Use `-k 0` to see everything.
 6. **A silent CMake failure is possible** (§5 bug 10): the configure can "succeed" while a whole
