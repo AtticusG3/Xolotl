@@ -3487,10 +3487,50 @@ bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
 
 void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
 
+// ---- GLM/GSQ-RCO routed-expert LoRA: the down correction, applied after the down kernel wrote `out`.
+// (The adapter's ffn_gate/up_exps factors are structural zeros, so only the down delta moves the output.)
+__global__ void __launch_bounds__(256) lora_down_kernel(const int32_t* __restrict__ ent_exp,
+                                                        const int32_t* __restrict__ ent_dst,
+                                                        const float* __restrict__ a_d, const float* __restrict__ b_d,
+                                                        const float* __restrict__ h, int64_t n_ff, int64_t n_embd,
+                                                        int64_t n_experts, int32_t lo, int32_t hi,
+                                                        float* __restrict__ out) {
+    const int e = lo + blockIdx.x;
+    if (e >= hi) return;
+    const int ex = ent_exp[e];
+    if (ex < 0 || ex >= n_experts) return;
+    const int t = threadIdx.x;
+    const float* he = h + (size_t) e * (size_t) n_ff;
+    const float* ad = a_d + (size_t) ex * (size_t) n_ff;
+    __shared__ float sh[256];
+    float s = 0.f;
+    for (int64_t i = t; i < n_ff; i += blockDim.x) s += ad[i] * he[i];
+    sh[t] = s;
+    __syncthreads();
+    for (int o = blockDim.x >> 1; o > 0; o >>= 1) {
+        if (t < o) sh[t] += sh[t + o];
+        __syncthreads();
+    }
+    const float S = sh[0];
+    const float* bd = b_d + (size_t) ex * (size_t) n_embd;
+    float* o = out + (size_t) ent_dst[e] * (size_t) n_embd;
+    for (int64_t j = t; j < n_embd; j += blockDim.x) o[j] += bd[j] * S;
+}
+
+// The down correction alone, for products that are not native_expert_grouped (the MMQ chunk path): entry i of
+// [0, n) has expert ent_exp[i], its float SwiGLU row h[i * n_ff ..], and writes row ent_dst[i] of `out`.
+void native_expert_lora_down(const NativeExpertLora& lora, const int32_t* ent_exp, const int32_t* ent_dst,
+                             const float* h, int64_t n_ff, int64_t n_embd, int32_t n, float* out, void* stream) {
+    if (!lora.a_d || n <= 0) return;
+    lora_down_kernel<<<(unsigned) n, 256, 0, (cudaStream_t) stream>>>(ent_exp, ent_dst, lora.a_d, lora.b_d, h, n_ff, n_embd,
+                                                                      lora.n_experts, 0, n, out);
+    check("native_expert_lora_down");
+}
+
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups) {
+                           int64_t grid_groups, const NativeExpertLora* lora) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
     if (L.n_ff % 32 != 0) { std::fprintf(stderr, "native_expert_grouped: n_ff %lld\n", (long long) L.n_ff); std::exit(1); }
     cudaStream_t s = (cudaStream_t) stream;
@@ -3622,7 +3662,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     static const bool sw_fused = env_on("STRATA_HIP_SWIGLU_FUSED");
     const bool sw_v1 = v1 || !sw_fused;
 #else
-    const bool sw_v1 = v1;
+    const bool sw_v1 = v1 || (lora && lora->a_d != nullptr);   // the down LoRA needs the float `h`
 #endif
     if (sw_v1) {
         swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh, L.swiglu_limit);
@@ -3673,6 +3713,13 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
     check("native_expert_grouped/down");
+    if (lora && lora->a_d && lora->ent_lo < lora->ent_hi &&
+        std::getenv("GLM_LORA_NO_DOWN") == nullptr) {   // after the down kernel wrote `out` (GLM/GSQ-RCO abliteration)
+        lora_down_kernel<<<(unsigned) (lora->ent_hi - lora->ent_lo), 256, 0, s>>>(
+            lora->ent_exp, ent_dst, lora->a_d, lora->b_d, h, L.n_ff, L.n_embd, lora->n_experts,
+            (int32_t) lora->ent_lo, (int32_t) lora->ent_hi, out);
+        check("native_expert_grouped/lora down");
+    }
 }
 
 #include "fork/fork_weighted_sum.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)

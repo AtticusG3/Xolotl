@@ -1381,6 +1381,13 @@ if(STRATA_NATIVE_EXPERTS)
     # STRATA_MMQ_KQUANTS q4_k q5_k q5_1, the experts of Unsloth's UD-Q4_K_XL (docs/UNSLOTH_Q4.md; the dispatch
     # follows eddoursul/Strata 7706c1b); q6_k is HIP only
     set(_strata_mmq_cuda_types ${_strata_mmq_types})
+    # xolotl: the plain quantizations the dense lineage's moe_mmq.cu advertises (Q4_0 / Q4_1 / IQ1_S - a plain
+    # llama-quantize Q4_0 GGUF, e.g. bartowski's Qwen3.8-Flash-Next-Q4_0).  The dense lineage's file named them in
+    # a hand-written case list written against a build that GLOBbed every template instance, so they linked there;
+    # the fork's CUDA branch instead lists its instances explicitly and its file never mentioned them, so after the
+    # merge they were advertised with no instance and the link failed (undefined mul_mat_q_case<GGML_TYPE_Q4_0>).
+    # Adding them here is what the generator's contract asks for: advertised == instantiated.
+    list(APPEND _strata_mmq_cuda_types q4_0 q4_1 iq1_s)
     if(STRATA_MMQ_KQUANTS)
       # xolotl: the fork and GLM both added q2_k/q3_k/mxfp4 here for the SAME reason (MiMo/DS4 GSQ-RCO experts;
       # without them the dispatch cases in moe_mmq.cu fail to link).  Kept as the fork's two appends.
@@ -1393,13 +1400,16 @@ if(STRATA_NATIVE_EXPERTS)
     # xolotl: moe_mmq.cu includes the GENERATED strata/prefill/mmq_types.inc, but neither the fork's nor the
     # dense lineage's CMakeLists included cmake/mmq_types.cmake or called the generator - the wiring was lost in
     # the merge and the file has never existed in git.  Generate it from the CUDA type list into the build tree.
+    # It goes under generated/ and NOT straight into ${CMAKE_CURRENT_BINARY_DIR}: the latter would create the
+    # directory <build>/strata, which collides with add_executable(strata ...) - the linker then fails with
+    # "cannot open output file strata: Is a directory".
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mmq_types.cmake)
-    strata_gen_mmq_types(${CMAKE_CURRENT_BINARY_DIR}/strata/prefill/mmq_types.inc "${_strata_mmq_cuda_types}")
+    strata_gen_mmq_types(${CMAKE_CURRENT_BINARY_DIR}/generated/strata/prefill/mmq_types.inc "${_strata_mmq_cuda_types}")
     foreach(_t IN LISTS _strata_mmq_cuda_types)
       target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
     target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
-                               ${CMAKE_CURRENT_BINARY_DIR}
+                               ${CMAKE_CURRENT_BINARY_DIR}/generated
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
     if(MSVC)

@@ -1587,7 +1587,13 @@ void Ds41MoeTier::set_slot_gib(double gib) { im_->cfg.slot_gib = gib; }
 
 void Ds41MoeTier::set_cache_enabled(bool on) {
     if (!im_) return;
-    if (!on && im_->gpu && im_->gpu->cache) return;   // an open cache is release_cache()'s to drop, not a config flip's
+#if defined(DS4_MOE_CUDA)
+    // an open cache is release_cache()'s to drop, not a config flip's.  UNION (xolotl): the CPU flavour's stub Gpu
+    // has no cache member, so this has to be guarded - the fork never hit it because its configure has no ggml-cpu
+    // target and v41_engine.cmake only creates ds41_moe_cpu under `if(TARGET strata_kernels_cpu AND TARGET ggml-cpu)`;
+    // the merged dense lineage enables ggml-cpu, which wakes the CPU flavour up.
+    if (!on && im_->gpu && im_->gpu->cache) return;
+#endif
     im_->cfg.no_cache = !on;
 }
 
