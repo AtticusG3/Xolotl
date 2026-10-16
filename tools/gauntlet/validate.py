@@ -45,11 +45,29 @@ def ungradable(task: Path) -> str | None:
     return "no hidden test_hidden_*.py files and no 'answer' key - nothing grades this task"
 
 
+def validate_answer(task: Path, pattern: str) -> bool:
+    """An exact-answer task: reference/answer.txt must match the regex, trap/answer.txt (if any) must not, and a
+    final message that hedges with the right answer plus the trap's must not match either."""
+    import re
+    ref = (task / "reference" / "answer.txt").read_text()
+    checks = [("reference answer: matches", re.search(pattern, ref) is not None)]
+    if (task / "trap" / "answer.txt").is_file():
+        trap = (task / "trap" / "answer.txt").read_text()
+        checks.append(("trap answer: rejected", re.search(pattern, trap) is None))
+        checks.append(("hedged reference+trap: rejected", re.search(pattern, ref + "\nor maybe " + trap) is None))
+    ok = all(c[1] for c in checks)
+    print(f"{'OK  ' if ok else 'BAD '} {task.name}: " + ", ".join(f"{n} {'yes' if v else 'NO'}" for n, v in checks))
+    return ok
+
+
 def validate(task: Path) -> bool:
     why = ungradable(task)
     if why:
         print(f"BAD  {task.name}: {why}")
         return False
+    meta = json.loads((task / "task.json").read_text())
+    if "answer" in meta:
+        return validate_answer(task, meta["answer"])
     checks = []
     d = stage(task, None)
     checks.append(("start: hidden FAIL", not pytest_ok(d, "hidden")))
