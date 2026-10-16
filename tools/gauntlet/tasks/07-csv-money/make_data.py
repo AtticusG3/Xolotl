@@ -74,7 +74,7 @@ def write_export(path, dialect, data, delim=None):
 
 def expected_report(files):
     """files: [(name, rows)] -> the report text, computed from the raw rows only."""
-    months, accounts, dups = {}, {}, []
+    months, accounts, ledger, dups = {}, {}, {}, []
     grand = Decimal("0.00")
     for name, data in files:
         seen = set()
@@ -85,6 +85,7 @@ def expected_report(files):
                 dups.append((name, date, acct, norm))
                 continue
             seen.add(key)
+            ledger.setdefault(acct, []).append((date, norm))
             months.setdefault((acct, date[:7]), [Decimal("0.00"), 0])
             months[(acct, date[:7])][0] += norm
             months[(acct, date[:7])][1] += 1
@@ -96,6 +97,12 @@ def expected_report(files):
     lines += [f"{a},{mo},{m[0]:.2f},{m[1]}" for (a, mo), m in sorted(months.items())]
     lines += ["[account]", "account,net,count"]
     lines += [f"{a},{accounts[a][0]:.2f},{accounts[a][1]}" for a in sorted(accounts)]
+    lines += ["[ledger]", "account,date,net,balance"]
+    for a in sorted(ledger):
+        bal = Decimal("0.00")
+        for d, v in sorted(ledger[a], key=lambda r: r[0]):  # stable: equal dates keep input order
+            bal += v
+            lines.append(f"{a},{d},{v:.2f},{bal:.2f}")
     lines += ["[total]", f"{BASE},{grand:.2f}", "[duplicates]", "file,date,account,net"]
     lines += [f"{n},{d},{a},{v:.2f}" for n, d, a, v in dups]
     return "\n".join(lines) + "\n"

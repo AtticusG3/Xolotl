@@ -69,7 +69,7 @@ def build_report(data_dir, out_path):
     base, rates = _rates(os.path.join(data_dir, "rates.yaml"))
     files = sorted(f for f in os.listdir(data_dir) if f != "rates.yaml"
                    and os.path.isfile(os.path.join(data_dir, f)))
-    months, accounts, dups = {}, {}, []
+    months, accounts, ledger, dups = {}, {}, {}, []
     grand = Decimal("0.00")
     for name in files:
         with open(os.path.join(data_dir, name), newline="", encoding="utf-8-sig") as f:
@@ -90,6 +90,7 @@ def build_report(data_dir, out_path):
                     dups.append((name, date, acct, norm))
                     continue
                 seen.add(key)
+                ledger.setdefault(acct, []).append((date, norm))
                 month = date[:7]
                 m = months.setdefault((acct, month), [Decimal("0.00"), 0])
                 m[0], m[1] = m[0] + norm, m[1] + 1
@@ -101,6 +102,12 @@ def build_report(data_dir, out_path):
               for acct, month in sorted(months)]
     lines += ["[account]", "account,net,count"]
     lines += [f"{acct},{_money(accounts[acct][0])},{accounts[acct][1]}" for acct in sorted(accounts)]
+    lines += ["[ledger]", "account,date,net,balance"]
+    for acct in sorted(ledger):
+        bal = Decimal("0.00")
+        for date, norm in sorted(ledger[acct], key=lambda r: r[0]):  # stable: ties keep input order
+            bal += norm
+            lines.append(f"{acct},{date},{_money(norm)},{_money(bal)}")
     lines += ["[total]", f"{base},{_money(grand)}", "[duplicates]", "file,date,account,net"]
     lines += [f"{name},{date},{acct},{_money(norm)}" for name, date, acct, norm in dups]
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:

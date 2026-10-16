@@ -59,6 +59,14 @@ OUTPUT - UTF-8, '\n' line ends, exactly these lines
   sorted by account then month ascending;
   [account] then 'account,net,count' then one row per account, sorted by account
   ascending;
+  [ledger] then 'account,date,net,balance' then one line per KEPT row (a dropped
+  duplicate never appears), grouped by account ascending; within an account the
+  rows are in date-ascending order, and rows sharing a date keep INPUT ORDER
+  (files by ascending name, then rows in the order they appear in the file).
+  'balance' is the running sum, within that account, of these rows' quantized
+  nets up to and including that row - the SAME per-row quantization as above, so
+  a dropped duplicate never moves a balance, every account in [account] has at
+  least one [ledger] row, and an account's last balance equals its [account] net;
   [total] then '<base>,<net>' - the grand total, the sum of every kept row;
   [duplicates] then 'file,date,account,net' then one row per dropped duplicate
   ('file' its base name, 'net' the 2-decimal normalised amount).
