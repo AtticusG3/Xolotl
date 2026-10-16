@@ -135,12 +135,27 @@ def to_encoder_messages(messages, tools):
     return out
 
 
+_ChatTemplate = F.ChatTemplate   # the server's own, kept for its capability probe
+
+
 class Ds41Template:
     """Stands in for F.ChatTemplate: render(messages, tools, add_generation_prompt, **kwargs) -> prompt text."""
     source = "{# DeepSeek-V4.1: rendered by serve_ds41.py with DeepSeek's encoder (dsv41_encoding.py) #}"
 
     def __init__(self, path=None):
-        pass
+        self._caps = None
+
+    @property
+    def caps(self):
+        """xolotl: the 0.1.44 server reports the template's capabilities (props: chat_template_caps), detected by
+        F.ChatTemplate._detect_caps through render() and the tool-call parser - both DeepSeek's here."""
+        if self._caps is None:
+            try:
+                self._caps = _ChatTemplate._detect_caps(self)
+            except Exception:   # noqa: BLE001 - a hint only (as in the server): never fail a request over it
+                self._caps = {"supports_tools": True, "supports_tool_calls": True, "supports_system_role": True,
+                              "supports_parallel_tool_calls": True, "supports_preserve_reasoning": False}
+        return self._caps
 
     def render(self, messages, tools=None, add_generation_prompt=True, **kw):
         mode = "chat" if kw.get("enable_thinking") is False else "thinking"
@@ -213,6 +228,10 @@ def ds41_parse_tool_call(body: str, schema=None):
 
 
 F.CALL_START, F.CALL_END = INVOKE_OPEN, INVOKE_CLOSE
+# xolotl: the 0.1.44 parser treats a call opener as a call only when Qwen's `<function=` follows it (else it is
+# prose naming the format); this model's follower is DSML (` name="...">`), so with FUNC_START = "" that guard always passes -
+# the pre-0.1.44 behaviour.  Only the opt-in tool_call_recovery reads FUNC_START otherwise (off here).
+F.FUNC_START = ""
 F.call_end = ds41_call_end
 F.parse_tool_call = ds41_parse_tool_call
 _op_init, _op_feed, _op_finish = F.OutputParser.__init__, F.OutputParser.feed, F.OutputParser.finish
@@ -239,9 +258,9 @@ def _op_feed_ds41(self, delta: str):
     return _op_feed(self, _strip_wrappers(self, delta, False))
 
 
-def _op_finish_ds41(self):
+def _op_finish_ds41(self, *a, **k):   # *a/**k: the 0.1.44 server's finish(reason=...)
     out = _op_feed(self, _strip_wrappers(self, "", True)) if self.dsml_hold else []
-    return out + _op_finish(self)
+    return out + _op_finish(self, *a, **k)
 
 
 F.OutputParser.__init__ = _op_init_ds41

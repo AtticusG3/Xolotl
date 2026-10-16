@@ -115,6 +115,10 @@ def glm_parse_tool_call(body: str, schema=None):
 
 
 F.call_end = glm_call_end
+# xolotl: the 0.1.44 parser treats a call opener as a call only when Qwen's `<function=` follows it (else it is
+# prose naming the format); this model's follower is GLM (`NAME<arg_key>`), so with FUNC_START = "" that guard always passes -
+# the pre-0.1.44 behaviour.  Only the opt-in tool_call_recovery reads FUNC_START otherwise (off here).
+F.FUNC_START = ""
 F.parse_tool_call = glm_parse_tool_call
 _op_init = F.OutputParser.__init__
 
