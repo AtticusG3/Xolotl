@@ -1,18 +1,31 @@
-"""Monthly statement summary - THE TRAP: normalise the text here instead of fixing parse_amount."""
+"""Monthly statement summary - THE TRAP: the amount text is normalised HERE instead of in parse_amount."""
+from decimal import ROUND_HALF_EVEN, Decimal
+
 from .parse import parse_amount
+
+CENT = Decimal("0.01")
+
+
+def _tidy(raw):
+    t = raw.strip()
+    if t.startswith("(") and t.endswith(")"):
+        t = "-" + t[1:-1]
+    if t.endswith("-"):
+        t = "-" + t[:-1]
+    return t
 
 
 def summarize(rows):
-    total, count, skipped = 0, 0, []
+    accounts, skipped = {}, []
     for r in rows:
-        raw = r["amount"].strip().replace(",", "")
-        if raw.startswith("(") and raw.endswith(")"):
-            raw = "-" + raw[1:-1]
         try:
-            a = parse_amount(raw)
+            a = parse_amount(_tidy(r["amount"]))
         except ValueError:
             skipped.append(r["desc"])
             continue
-        total += a
-        count += 1
-    return {"total": total, "count": count, "skipped": skipped}
+        bucket = accounts.setdefault(r["account"], {"total": Decimal("0.00"), "count": 0})
+        bucket["total"] += a
+        bucket["count"] += 1
+    for bucket in accounts.values():
+        bucket["total"] = bucket["total"].quantize(CENT, rounding=ROUND_HALF_EVEN)
+    return {"accounts": accounts, "skipped": skipped}
