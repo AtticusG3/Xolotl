@@ -20,14 +20,14 @@ Built on <a href="https://github.com/Niko1221/Strata">Strata</a> and heavily ext
 through the real server, while it solved real tasks (21 HumanEval problems, 10 tool-call tasks, 3 agentic bug-fix
 loops), greedy, thinking on with a 32K-token thinking budget.
 
-| Model | Size | Writes | Reads | HumanEval | Tool calls | Agentic | Context |
+| Model | Size | Prefill | Decode | HumanEval | Tool calls | Agentic | Context |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **[DeepSeek-V4.1-Flash](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)** | 552B MoE | **26.8 tok/s** | **~210 tok/s** (8K prompt) | 21/21 | 10/10 | 3/3 | 512K |
-| **GLM-5.3-Flash** | 320B MoE | ~28 tok/s | — | numbers coming | | | 512K |
-| **Qwen3.8-Flash-Next** | 125B MoE | **127.8 tok/s** | 475 tok/s* | 21/21 | 10/10 | 3/3 | 200K |
-| **Qwen3.8-27B** (dense) | 27B | **98.5 tok/s** | 1,097 tok/s* | 21/21 | 10/10 | 3/3 | 200K |
+| **[DeepSeek-V4.1-Flash](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)** | 552B MoE | **~210 tok/s** (8K prompt) | **26.8 tok/s** | 21/21 | 10/10 | 3/3 | 512K |
+| **GLM-5.3-Flash** | 320B MoE | — | ~28 tok/s | numbers coming | | | 512K |
+| **Qwen3.8-Flash-Next** | 125B MoE | 475 tok/s* | **127.8 tok/s** | 21/21 | 10/10 | 3/3 | 200K |
+| **Qwen3.8-27B** (dense) | 27B | 1,097 tok/s* | **98.5 tok/s** | 21/21 | 10/10 | 3/3 | 200K |
 
-<sub>"Writes" = decode speed during those tasks; "Reads" = prompt prefill. \*Measured on the short HumanEval prompts,
+<sub>Decode = generation speed during those tasks; prefill = prompt-reading speed. \*Measured on the short HumanEval prompts,
 not a long-prompt figure. DeepSeek-V4.1's 8K figure is a 7,806-token prompt; on 20K prompts it reaches ~350 tok/s.
 GLM-5.3-Flash's full run is being redone with a decode-routing fix (see
 [docs/xolotl/BENCHMARKS.md](docs/xolotl/BENCHMARKS.md)).</sub>
