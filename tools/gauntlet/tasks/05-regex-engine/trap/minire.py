@@ -1,4 +1,9 @@
-"""A small regular-expression engine (THE TRAP: backtracking)."""
+"""THE TRAP: what an agent writes from memory of Python's `re`.
+
+Leftmost-first with full give-back (backtracking), `.` excluding a newline, `^`/`$` as
+string anchors, and no invented `~` operator (it is a literal here).  Passes every visible
+test, fails the hidden ones - and is exponential on (a*)*b / (a|aa)*c.
+"""
 
 
 class _P:
@@ -23,10 +28,14 @@ class _P:
     def concat(self):
         items = []
         while self.peek() is not None and self.peek() not in "|)":
-            items.append(self.repeat())
+            items.append(self.item())
         return ("cat", items)
 
-    def repeat(self):
+    def item(self):
+        c = self.peek()
+        if c in "^$":                      # Python's string anchors
+            self.take()
+            return ("bol",) if c == "^" else ("eol",)
         a = self.atom()
         while self.peek() is not None and self.peek() in "*+?":
             a = (self.take(), a)
@@ -52,7 +61,7 @@ class _P:
             return ("lit", self.take())
         if c == "[":
             return self.cls()
-        return ("lit", c)
+        return ("lit", c)                  # `~` lands here: no such operator
 
     def cls(self):
         neg = False
@@ -86,9 +95,21 @@ class _P:
         return ("cls", neg, items)
 
 
+def _match_char(node, c):
+    if node[0] == "any":
+        return c != "\n"                   # Python's default
+    if node[0] == "lit":
+        return node[1] == c
+    hit = any(lo <= c <= hi for lo, hi in node[2])
+    return hit != node[1]
+
+
 def _m(node, text, i, k):
-    """THE TRAP: a straightforward backtracking matcher - correct, but exponential on (a*)*b."""
     kind = node[0]
+    if kind == "bol":
+        return i == 0 and k(i)
+    if kind == "eol":
+        return i == len(text) and k(i)
     if kind in ("lit", "any", "cls"):
         return i < len(text) and _match_char(node, text[i]) and k(i + 1)
     if kind == "cat":
@@ -105,15 +126,6 @@ def _m(node, text, i, k):
             return _m(sub, text, j, lambda jj: jj != j and star(jj)) or k(j)
         return star(i)
     return _m(sub, text, i, lambda jj: _m(("*", sub), text, jj, k))
-
-
-def _match_char(node, c):
-    if node[0] == "any":
-        return True
-    if node[0] == "lit":
-        return node[1] == c
-    hit = any(lo <= c <= hi for lo, hi in node[2])
-    return hit != node[1]
 
 
 def fullmatch(pattern, text):

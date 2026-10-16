@@ -1,4 +1,9 @@
-"""A small regular-expression engine (reference: parse -> Thompson NFA -> set simulation, O(len(p) * len(t)))."""
+"""Reference: fullmatch for the Gauntlet spec - longest-match commitment (no backtracking),
+line-wise `^`/`$` with `.` matching a newline, and the invented odd-offset operator `~`.
+
+Parse -> AST -> one non-backtracking pass, memoised on (node, offset): polynomial in
+len(pattern) * len(text).
+"""
 
 
 class _P:
@@ -18,19 +23,32 @@ class _P:
         while self.peek() == "|":
             self.take()
             branches.append(self.concat())
-        return ("alt", branches) if len(branches) > 1 else branches[0]
+        return ("alt", tuple(branches)) if len(branches) > 1 else branches[0]
 
     def concat(self):
         items = []
         while self.peek() is not None and self.peek() not in "|)":
-            items.append(self.repeat())
-        return ("cat", items)
+            items.append(self.item())
+        return ("cat", tuple(items))
 
-    def repeat(self):
+    def item(self):
+        c = self.peek()
+        if c == "^":
+            self.take()
+            self._bare()
+            return ("bol",)
+        if c == "$":
+            self.take()
+            self._bare()
+            return ("eol",)
         a = self.atom()
-        while self.peek() is not None and self.peek() in "*+?":
+        while self.peek() is not None and self.peek() in "*+?~":
             a = (self.take(), a)
         return a
+
+    def _bare(self):
+        if self.peek() is not None and self.peek() in "*+?~":
+            raise ValueError("nothing to repeat")
 
     def atom(self):
         c = self.take()
@@ -40,8 +58,8 @@ class _P:
                 raise ValueError("missing )")
             self.take()
             return inner
-        if c in "*+?":
-            raise ValueError("nothing to repeat")
+        if c in "*+?~":
+            raise ValueError("nothing to modify")
         if c == ")":
             raise ValueError("unbalanced )")
         if c == ".":
@@ -83,58 +101,10 @@ class _P:
             else:
                 items.append((c, c))
             first = False
-        return ("cls", neg, items)
+        return ("cls", neg, tuple(items))
 
 
-def _compile(node, nfa):
-    """Thompson construction; returns (start, accept) state ids.  nfa: list of [kind, data, out1, out2]."""
-    def new(kind=None, data=None):
-        nfa.append([kind, data, None, None])
-        return len(nfa) - 1
-    k = node[0]
-    if k in ("lit", "any", "cls"):
-        s, e = new("char", node), new()
-        nfa[s][2] = e
-        return s, e
-    if k == "cat":
-        if not node[1]:
-            s = new()
-            return s, s
-        s, e = _compile(node[1][0], nfa)
-        for sub in node[1][1:]:
-            s2, e2 = _compile(sub, nfa)
-            nfa[e][2] = s2
-            e = e2
-        return s, e
-    if k == "alt":
-        s, e = new(), new()
-        outs = []
-        for b in node[1]:
-            bs, be = _compile(b, nfa)
-            outs.append(bs)
-            nfa[be][2] = e
-        nfa[s][0], nfa[s][1] = "split", outs
-        return s, e
-    q, sub = k, node[1]
-    bs, be = _compile(sub, nfa)
-    s, e = new(), new()
-    if q == "*":
-        nfa[s][0], nfa[s][1] = "split", [bs, e]
-        nfa[be][0], nfa[be][1] = "split", [bs, e]
-    elif q == "+":
-        nfa[s][2] = bs
-        nfa[be][0], nfa[be][1] = "split", [bs, e]
-    else:
-        nfa[s][0], nfa[s][1] = "split", [bs, e]
-        nfa[be][2] = e
-    return s, e
-
-
-def _match_char(node, c):
-    if node[0] == "any":
-        return True
-    if node[0] == "lit":
-        return node[1] == c
+def _in_class(node, c):
     hit = any(lo <= c <= hi for lo, hi in node[2])
     return hit != node[1]
 
@@ -144,27 +114,56 @@ def fullmatch(pattern, text):
     ast = p.alt()
     if p.i != len(pattern):
         raise ValueError("unbalanced )")
-    nfa = []
-    start, accept = _compile(ast, nfa)
+    n = len(text)
+    memo = {}
 
-    def closure(states):
-        seen, stack = set(), list(states)
-        while stack:
-            s = stack.pop()
-            if s is None or s in seen:
-                continue
-            seen.add(s)
-            kind = nfa[s][0]
-            if kind == "split":
-                stack.extend(nfa[s][1])
-            elif kind is None:
-                stack.append(nfa[s][2])
-        return seen
+    def run(node, i):
+        key = (node, i)
+        if key in memo:
+            return memo[key]
+        r = step(node, i)
+        memo[key] = r
+        return r
 
-    cur = closure([start])
-    for c in text:
-        nxt = [nfa[s][2] for s in cur if nfa[s][0] == "char" and _match_char(nfa[s][1], c)]
-        cur = closure(nxt)
-        if not cur:
-            return False
-    return accept in cur
+    def step(node, i):
+        k = node[0]
+        if k == "lit":
+            return i + 1 if i < n and text[i] == node[1] else None
+        if k == "any":
+            return i + 1 if i < n else None
+        if k == "cls":
+            return i + 1 if i < n and _in_class(node, text[i]) else None
+        if k == "bol":
+            return i if i == 0 or text[i - 1] == "\n" else None
+        if k == "eol":
+            return i if i == n or text[i] == "\n" else None
+        if k == "~":
+            return run(node[1], i) if i % 2 == 0 else None
+        if k == "cat":
+            for sub in node[1]:
+                i = run(sub, i)
+                if i is None:
+                    return None
+            return i
+        if k == "alt":
+            best = None
+            for b in node[1]:
+                j = run(b, i)
+                if j is not None and (best is None or j > best):
+                    best = j
+            return best
+        if k == "?":
+            j = run(node[1], i)
+            return i if j is None else j
+        j, got = i, False
+        while True:
+            r = run(node[1], j)
+            if r is None:
+                break
+            got = True
+            if r == j:
+                break
+            j = r
+        return j if (k == "*" or got) else None
+
+    return run(ast, 0) == n
