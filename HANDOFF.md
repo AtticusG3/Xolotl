@@ -1,5 +1,90 @@
-# Xolotl — HANDOFF (2026-10-16, session 3 — CURRENT; sessions 1-2 below are history)
+# Xolotl — HANDOFF (2026-10-16, session 4 — CURRENT; sessions 1-3 below are history)
+**State in one line:** the engine work is unchanged from session 3 (one tree, four models, verified); session 4 built
+and calibrated **The Gauntlet** — a new 10-task agentic benchmark in `tools/gauntlet/` where the full-precision API
+scores **3/10** — and stopped the HumanEval e2e chain mid-GLM on Mal's instruction. **Nothing pushed.**
 
+## S4.0 Resume
+
+```bash
+cd ~/AI/Xolotl && git status --short && git log --oneline -12
+python3 tools/gauntlet/validate.py            # must be 10x OK (exit 0) - the benchmark's own gate
+python3 tools/gauntlet/selftest.py            # must be a-e PASS (exit 0) - the runner's gate
+cat tools/gauntlet/README.md tools/gauntlet/HARDENING.md   # what the benchmark is, and how to harden it
+cat out/gauntlet-api-final.log               # the calibration run (3/10)
+```
+Then read `RESUME_PROMPT.md` section 14 for the continuation brief.
+
+## S4.1 What session 4 did
+
+1. **Built the Gauntlet** (10 tasks, one directory each) and calibrated it: the API scored 8/10 - too easy.
+2. **Hardened it in three waves** with `flash` workers (one slice per task, every slice gated by `validate.py` on its
+   own task + a derivability table): 01 -> three modules; 02 SemVer -> an invented release-stamp spec with `merge` and
+   a `select` constraint language; 04 -> 12 ids, a cross-footing count table, a one-clause exemption pair; 05 -> its
+   semantics un-puzzled from Python's `re`; 06 -> the purge-order contract + an 8-thread stress; 07 -> header-signature
+   dialects + per-row rounding + a running balance; 08 -> `C/Q/A` curves and arcs; 09 -> `agenda()` + `blackouts.txt` +
+   minimum notice; 10 -> a third module with cross-module faults.
+3. **Calibrated again: 3/10** (PASS 01, 02, 06 - all at the 12-step ceiling; FAIL 03, 04, 05, 07, 08, 09, 10), 246K
+   tokens, 1,453 s.
+4. **Fairness audit** (independent worker, read-only): all **246 hidden assertions** mapped to the sentences that
+   document them -> **FAIR AS IS**; four findings, all resolved (R1 07's unstated trailing newline, R2 05's substring
+   `import re` scan, R3 09's tzdb dependency, R4 03's wall-clock assertion).
+5. **Closed two grading-integrity holes** in the runner: the workspace could grade itself (`conftest.py` planted via
+   `run_python` measurably flipped 01 from "13 failed, 20 passed" to "33 passed") and model code inherited this
+   shell's environment (`DEEPSEEK_API_KEY` visible). Both fixed and probed.
+6. **Stopped the e2e chain** on Mal's instruction, mid-GLM, after its current problem: GLM has 5 of 21 HumanEval
+   attempted (PASS 0/8/16/24, FAIL 32 at its own 33,792-token ceiling); qflash and q27 never ran.
+
+## S4.2 Where everything is
+
+| what | where |
+| --- | --- |
+| the benchmark | `tools/gauntlet/` - `README.md` (full docs), `DESIGN.md` (rules + task table + verification record), `HARDENING.md` (evidence-backed levers + sources), `gauntlet.py` (runner), `validate.py`, `selftest.py`, `tasks/NN-*/` |
+| the calibration run | `out/gauntlet-api-final/` (+ `.log`); earlier waves: `out/gauntlet-api-rest/` (04/06/09/10), `out/gauntlet-api-0207/`, `out/gauntlet-api-01/` |
+| lane scripts | `verify/e2e/gauntlet-local-ds41.sh` (serve a local engine on 8151 + run + score; local-only, `verify/` is in `.git/info/exclude`), `verify/e2e/final-think-resume.sh` (the e2e remainder: qflash + q27 only, then score/speed) |
+| e2e results so far | `verify/e2e/final-think/r_ds41.out` (21/21 he, 10/10 tool, 3/3 agentic, 26.4 tok/s decode), `r_glm.out` (5 of 21 he, partial), `server_*.log` |
+| worker reports | `~/.quetza-data/conductor/reports/ga-*.md` (one per slice, each with its gate output and derivability table) |
+| the audit | `~/.quetza-data/conductor/reports/ga-audit-final.md` |
+
+## S4.3 Measured results (the numbers to quote)
+
+- **Gauntlet, `deepseek-flash`: 3/10** (was 8/10 pre-hardening). Passes 01, 02, 06 - each at the 12-step ceiling and
+  never calling `submit`. Misses are narrow: 03 one scene, 07/10 two cases, 04 two assertions; 05 (122) and 09 (36)
+  collapse.
+- **e2e**, thinking on with a 32K budget: DSV4.1 21/21 he, 10/10 tool, 3/3 agentic, decode 26.4 tok/s; GLM partial (5
+  problems, ~28 tok/s, one 893 s outlier and one failure at its token ceiling).
+
+## S4.4 Verification and integrity (all re-run by the conductor, not taken on a worker's word)
+
+- `validate.py` **10/10 OK** on the settled tree; `selftest.py` **a-e PASS** (a/b/c/d answer-grading + loud failure + a
+  real task solved; e = the workspace cannot grade itself).
+- **~100 repeat task-validations, zero flakes** (whole gate 3x; 06 10x; 03/08 10x each; 01/02/07/10 5x each).
+- **A fresh worktree at HEAD validates 10/10** - every task file ships (this is what caught 04's `service.log` being
+  swallowed by the repo-wide `*.log` ignore rule; fixed with a negation in `.gitignore`).
+- **Grading cannot be subverted**: deny-list + pre-grading strip + a six-variable child env (no credentials), each
+  verified with the conductor's own probe scripts.
+
+## S4.5 Parked (needs Mal's word)
+
+1. **The local quant contrast** - `bash verify/e2e/gauntlet-local-ds41.sh`. Expect hours; GPU must be free. Mal is
+   using the 4090 for a game, so: **do not start an engine without him saying so.**
+2. **The e2e remainder** - `bash verify/e2e/final-think-resume.sh` (qflash + q27, then score/speed over all four).
+3. **The push** to Strata-DSV4.1 - still gated on Mal's OK and the README table being complete (the V4.1 row is filled
+   from the measured run; the other three rows say `pending`).
+
+## S4.6 Traps that cost time this session (do not repeat)
+
+- **`pkill -f "<pattern>"` matches your own shell's command line** - it killed my own command mid-sequence twice, and
+  the teardown silently didn't happen. Use exact PIDs from `ps`, or a bracket pattern.
+- **`| tee out/x.log` fails if `out/` doesn't exist**, and the harness's python still starts; check the log file
+  exists before believing a run started.
+- **A relay `ask` sits in the worker's inbox until the worker polls it** - a long tool loop can miss it entirely; if
+  the report comes back without the addition, re-ask or dispatch a follow-up slice.
+- **Never run the full `validate.py` while a slice is editing its task dir** - you will read a half-written tree
+  (this produced a false "reference: hidden PASS NO" during the integrity slice).
+- **A worker's "verified" is a claim**: re-run the gate on the settled tree (that is how the mid-write false negative
+  was caught, and how the `service.log` ignore trap was found).
+
+---
 **State in one line:** all four models (DeepSeek-V4.1-Flash, GLM-5.3-Flash, Qwen3.8-Flash-Next, Qwen3.8-27B dense) +
 the legacy DeepSeek-V4-Flash-0731 engine run from THIS tree, verified against each one's previous production build;
 the live wrappers point here; the old trees are in `~/AI/Strata-Backup`.  **Nothing pushed.**  Mal: push only when
