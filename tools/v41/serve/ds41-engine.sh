@@ -49,5 +49,9 @@ export STRATA_PRESTAGE_GIB="${STRATA_PRESTAGE_GIB:-1.5}"
 # an explicit STRATA_PROMPT_BATCH still wins over the json's --prompt-batch (it is appended after those args)
 [ -n "${STRATA_PROMPT_BATCH:-}" ] && set -- "$@" --prompt-batch "$STRATA_PROMPT_BATCH"
 [ -z "$STRATA_SERVE_DSPARK" ] && unset STRATA_SERVE_DSPARK
+# xolotl: the unified tree builds every engine into build-xolotl; STRATA_BUILD_DIR overrides it, and the
+# pre-merge build dir (build-ds4-gpu) is still found so an old checkout of this script keeps working
+BUILD_DIR="${STRATA_BUILD_DIR:-$PWD/build-xolotl}"
+[ -x "$BUILD_DIR/ds41_generate" ] || [ ! -x "$PWD/build-ds4-gpu/ds41_generate" ] || BUILD_DIR="$PWD/build-ds4-gpu"
 exec flock "$LOCK" systemd-run --user --scope -q --unit="ds41-serve-$$" -p MemoryMax=84G -p MemorySwapMax=0 \
-    "$PWD/build-ds4-gpu/ds41_generate" "$@"
+    "$BUILD_DIR/ds41_generate" "$@"

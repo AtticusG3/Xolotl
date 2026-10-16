@@ -102,6 +102,10 @@ option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
 # #2027: defined here, before the GPU section reads it to register the native-expert tests (it was defined at the
 # native-experts section far below, so a first configure registered four tests fewer than the second)
 option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+# xolotl: the Qwen3.8-27B dense engine `strata-dense` (src/program/dense_main.cpp).  The dense lineage committed its
+# sources but never its CMake target - the production binary was built from an uncommitted CMakeLists in
+# /tmp/strata-dense-eval (gone).  Reconstructed from that build dir's link line and flags (~/AI/strata-dense-build).
+option(STRATA_DENSE "Build strata-dense, the Qwen3.8-27B dense GGUF engine (CUDA)" ON)
 
 if(STRATA_BUILD_CONVERSATION_TESTS)
   enable_testing()
@@ -614,6 +618,18 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   add_executable(strata src/program/generate.cpp)
   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
+
+  # xolotl: strata-dense (see option STRATA_DENSE).  Same shape as the production build: dense_model.cpp in
+  # strata_engine with STRATA_DENSE_MMQ=1 (its MMQ prompt path; set on that one file only, it is the only reader),
+  # dense_kernels.cu in strata_kernels, the binary linked against strata_engine + strata_mmq.
+  if(STRATA_DENSE AND STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS)
+    target_sources(strata_engine PRIVATE src/core/dense_model.cpp)
+    set_source_files_properties(src/core/dense_model.cpp PROPERTIES COMPILE_DEFINITIONS STRATA_DENSE_MMQ=1)
+    target_sources(strata_kernels PRIVATE src/kernels/cuda/dense_kernels.cu)
+    add_executable(strata-dense src/program/dense_main.cpp)
+    target_include_directories(strata-dense PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(strata-dense PRIVATE strata_engine strata_mmq ${_strata_gpu_runtime_target})
+  endif()
 
   if(STRATA_ENABLE_HIP)
     enable_testing()
@@ -1395,6 +1411,17 @@ if(STRATA_NATIVE_EXPERTS)
       list(APPEND _strata_mmq_cuda_types q2_k q3_k mxfp4)   # fork: DS4 Q2_K / MiMo Q3_K, MXFP4 experts
       if(STRATA_Q6K_EXPERTS OR STRATA_HIP_GFX906)   # UD-Q6_K_XL gate/up (docs/UNSLOTH_Q6.md),
         list(APPEND _strata_mmq_cuda_types q6_k)    #   and gfx906: moe_mmq.cu calls it under __HIPCC__
+      endif()
+    endif()
+    # xolotl: the dense prompt path multiplies EVERY projection through MMQ or none (dense_model.cpp mat_ok): one
+    # unsupported type sends the whole prompt down the token-at-a-time run().  The dense GGUFs mix Q5_0 / Q6_K
+    # tensors in, and the production strata-dense advertised both; without them it would silently lose MMQ prefill.
+    if(STRATA_DENSE)
+      if(NOT "q5_0" IN_LIST _strata_mmq_cuda_types)
+        list(APPEND _strata_mmq_cuda_types q5_0)
+      endif()
+      if(NOT "q6_k" IN_LIST _strata_mmq_cuda_types)
+        list(APPEND _strata_mmq_cuda_types q6_k)
       endif()
     endif()
     # xolotl: moe_mmq.cu includes the GENERATED strata/prefill/mmq_types.inc, but neither the fork's nor the

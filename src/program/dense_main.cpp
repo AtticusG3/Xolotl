@@ -10,7 +10,8 @@
 //   out   INFO key=value ...                      (optional facts for the Monitor)
 //   out   READY <context> stop                    ("stop": this engine honours STOP)
 //   in    GEN <max_new> [key=value ...] id,id,... (keys: temperature top_p top_k min_p penalty_last_n penalty_repeat
-//                                                  penalty_freq penalty_present seed; unknown keys are skipped)
+//                                                  penalty_freq penalty_present seed score; unknown keys are skipped)
+//   out   SCORE <id>:<lp> ... top=<id>:<lp>                   (score=ID,... only: /v1/decide, before the first T)
 //   out   PP <position> <prompt tokens> <ms> <tok/s>          every few dozen prompt tokens
 //   out   T <id>                                              one per generated token
 //   out   DONE <generated> <prompt> <prompt ms> <decode ms> <stop|length|cancel> 0 0 <reused>
@@ -931,6 +932,11 @@ int main(int argc, char** argv) {
         strata::kernels::SamplerParams sp;
         sp.top_k = 20; sp.top_p = 1.0f; sp.temperature = 0.0f; sp.greedy = true;
         unsigned long long seed = 0;
+        // local (Indra's Mirror, /v1/decide): score=ID,ID,... prints `SCORE <id>:<logprob> ... top=<id>:<logprob>` -
+        // the log-softmax of the raw logits that pick the first generated token (no bias, no temperature), the same
+        // line as the MoE engine's (generate.cpp), so the server's parse_score_line reads both
+        std::vector<int32_t> score_ids;
+        bool score_bad = false;
         for (;;) {
             while (*endp == ' ') ++endp;
             const char* start = endp;
@@ -950,7 +956,12 @@ int main(int argc, char** argv) {
             else if (key == "penalty_freq") sp.penalty_freq = fv;
             else if (key == "penalty_present") sp.penalty_present = fv;
             else if (key == "seed") seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
+            else if (key == "score") {
+                score_bad = !parse_ids(tok.c_str() + eq + 1, score_ids) || score_ids.size() > 64;
+                for (const int32_t id : score_ids) score_bad = score_bad || id >= n_vocab;
+            }
         }
+        if (score_bad) { std::printf("ERR score: expected 1-64 token ids below the vocabulary size\n"); std::fflush(stdout); continue; }
         std::vector<int32_t> ids;
         if (max_new < 1 || !parse_ids(endp, ids)) { std::printf("ERR bad request\n"); std::fflush(stdout); continue; }
         if ((long long) ids.size() + 1 > model.max_context()) {
@@ -1129,6 +1140,25 @@ int main(int argc, char** argv) {
         int32_t next = -1;
         bool done = cancelled;                      // a STOP during the prompt: nothing is sampled
         if (!cancelled) {
+            if (!score_ids.empty()) {
+                const std::vector<float> row = read_logits(model, 0);
+                int64_t top = 0;
+                for (int64_t v = 1; v < (int64_t) row.size(); ++v)
+                    if (row[(size_t) v] > row[(size_t) top]) top = v;
+                double sum = 0.0;
+                for (const float l : row) sum += std::exp((double) l - (double) row[(size_t) top]);
+                const double lse = (double) row[(size_t) top] + std::log(sum);
+                std::string sline = "SCORE";
+                char b[64];
+                for (const int32_t id : score_ids) {
+                    std::snprintf(b, sizeof b, " %lld:%.6f", (long long) id, (double) row[(size_t) id] - lse);
+                    sline += b;
+                }
+                std::snprintf(b, sizeof b, " top=%lld:%.6f", (long long) top, (double) row[(size_t) top] - lse);
+                sline += b;
+                std::printf("%s\n", sline.c_str());
+                std::fflush(stdout);
+            }
             if (!draw(model.logits_col(0), (uint64_t) model.position(), next)) { fail(err); continue; }
             done = emit(next);
             std::fflush(stdout);

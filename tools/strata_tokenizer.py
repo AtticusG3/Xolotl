@@ -267,7 +267,10 @@ class Tokenizer:
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again.  The ids are the ones _bpe gives: this only skips the work.
         cache = self._piece_ids
-        for piece in self._re.findall(text):
+        # xolotl: _pre_split, not the dense lineage's `self._re.findall` - the fork replaced `_re` with the
+        # per-`pre` pattern list `_pre_res` (joyai-llm = 3 sequential regexes); for qwen35's single pattern the two
+        # give the same pieces (the pattern covers every character, so there are no unmatched gaps).
+        for piece in self._pre_split(text):
             got = cache.get(piece)
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))

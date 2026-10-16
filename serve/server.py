@@ -64,6 +64,7 @@ from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
+from serve.voice import VoiceServer, start_lazy_voice  # noqa: E402  local: the voice sidecar (ASR/TTS)
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -2332,7 +2333,7 @@ class Vision:
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
             self.last_used = time.time()
-            if self.lazy_vision and not self.alive():  # local: lazy vision (the caller holds the FIFO)
+            if getattr(self, "lazy_vision", False) and not self.alive():  # local: lazy vision (the caller holds the FIFO)
                 if self.on_start is not None:
                     self.on_start()
                 print("[strata] starting the vision encoder (lazy) ...", flush=True)
@@ -2944,6 +2945,7 @@ class Service:
                  vision: Vision | None = None, sampling_defaults: dict | None = None,
                  fit_max_tokens: bool = False):
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
+        self.voice_servers: dict = {}                    # local (Indra's Mirror): lazily-started ASR/TTS sidecars
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))   # texts that stay text inside a message
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
@@ -5104,6 +5106,37 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
+        def _raw(self, code, body: bytes, content_type: str):
+            """local (Indra's Mirror): a passthrough response - the voice sidecar's own bytes (e.g. WAV)."""
+            self.send_response(code)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self._cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _audio(self, path):
+            """local (Indra's Mirror): proxy an audio request to the voice sidecar, starting it lazily and
+            touching it so the idle watcher leaves it alone while a clip is transcribed (or spoken)."""
+            kind = "asr" if path == "/v1/audio/transcriptions" else "tts"
+            server = svc.voice_servers.get(kind)
+            if server is None:
+                self._drain_body()
+                self._json(404, {"error": {"message": f"no {kind} server configured (add a \"voice\" block)"}})
+                return
+            body = self._body()
+            try:
+                server.ensure()
+            except RuntimeError as e:
+                self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                return
+            server.touch()
+            try:
+                status, out, ctype = server.forward(path, body, self.headers.get("Content-Type", ""))
+            finally:
+                server.touch()
+            self._raw(status, out, ctype)
+
         def _authorized(self) -> bool:
             if not svc.api_key:
                 return True
@@ -5247,6 +5280,9 @@ def make_handler(svc: Service):
                         # divides it by n_ctx; without the key it reads 0 % against Strata forever (#562).
                         in_use = int(svc.status.get("prompt_tokens") or 0)
                         st = dict(svc.status)
+                    # local: the extra slot keys (?verbose=1) - phase/progress/live text; /metrics carries the same,
+                    # /slots keeps llama-server's exact shape by default so upstream's contract tests still hold
+                    verbose = parse_qs(urlsplit(self.path).query).get("verbose", ["0"])[0] not in ("0", "", "false", "no")
                     if getattr(svc.engine, "batch", 0) and hasattr(svc.engine, "slots_view"):
                         # --batch: one entry per slot (the same view /metrics has), not one for the whole engine
                         n_ctx = svc.reported_ctx()
@@ -5254,15 +5290,16 @@ def make_handler(svc: Service):
                                   "n_prompt_tokens": int(s.get("prompt_tokens") or s.get("held_tokens") or 0)}
                                  for s in svc.engine.slots_view()]
                     else:
-                        slots = [{"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
-                                  "n_prompt_tokens": in_use,
-                                  # local: phase, progress and the live thinking/answer text
-                                  "phase": st.get("phase") if busy else None,
-                                  "generated": st.get("generated") if busy else None,
-                                  "elapsed_s": round(time.time() - st["started"], 1)
-                                  if busy and st.get("started") else None,
-                                  "reasoning": st.get("reasoning_tail") if busy else None,
-                                  "content": st.get("output_tail") if busy else None}]
+                        slot = {"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
+                                "n_prompt_tokens": in_use}
+                        if verbose:
+                            slot.update({"phase": st.get("phase") if busy else None,
+                                         "generated": st.get("generated") if busy else None,
+                                         "elapsed_s": round(time.time() - st["started"], 1)
+                                         if busy and st.get("started") else None,
+                                         "reasoning": st.get("reasoning_tail") if busy else None,
+                                         "content": st.get("output_tail") if busy else None})
+                        slots = [slot]
                     self._json(200, slots if loaded else [])
             elif path == "/v1/status":
                 if self._authorized():
@@ -5281,6 +5318,9 @@ def make_handler(svc: Service):
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             if path.startswith("/v1/") and self._foreign_page():
+                return
+            if path in ("/v1/audio/transcriptions", "/v1/audio/speech"):   # local: the voice sidecar
+                self._audio(path)
                 return
             if path == "/settings":
                 self._settings()
@@ -6755,6 +6795,13 @@ def main() -> int:
     if cfg.get("vision") and cfg["vision"].get("lazy"):    # local: lazy vision
         svc.start_lazy_vision(int(cfg["vision"].get("lazy_reserve_mib", 2400)),
                               float(cfg["vision"].get("lazy_idle_s", 300)))
+    voice_cfg = cfg.get("voice") or {}                     # local: the voice sidecar (ASR/TTS)
+    if voice_cfg:
+        servers = {kind: VoiceServer(kind, voice_cfg[kind]) for kind in ("asr", "tts")
+                   if isinstance(voice_cfg.get(kind), dict) and voice_cfg[kind].get("cmd")}
+        svc.voice_servers = servers
+        if servers:
+            start_lazy_voice(svc, servers, float(voice_cfg.get("lazy_idle_s", 120)))
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
@@ -6794,6 +6841,9 @@ def main() -> int:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
+        # local: the voice sidecar's children too - without this a SIGTERM left the ASR/TTS server running
+        # (and holding ~1.4 GiB of VRAM) after the server that started it was gone
+        closers += [v.stop for v in svc.voice_servers.values()]
         for close in filter(None, closers):
             try:
                 close()

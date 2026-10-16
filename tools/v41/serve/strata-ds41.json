@@ -1,5 +1,5 @@
 {
- "exe": "/home/mal/AI/Strata-DS4/tools/v41/serve/ds41-engine.sh",
+ "exe": "/home/mal/AI/Xolotl/tools/v41/serve/ds41-engine.sh",
  "args": [
   "-m",
   "/media/mal/SSD NVME/AI/V41-GSQ/V41-GSQ.gguf",
@@ -26,7 +26,7 @@
   "--prompt-batch",
   "12288"
  ],
- "cwd": "/home/mal/AI/Strata-DS4",
+ "cwd": "/home/mal/AI/Xolotl",
  "tokenizer": "/media/mal/SSD NVME/AI/V41-GSQ/tokenizer",
  "model_name": "deepseek-v4.1-flash-strata-gsq",
  "log": "/tmp/strata-ds41.log",
