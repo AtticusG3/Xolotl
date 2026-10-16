@@ -22,7 +22,7 @@ loops), greedy, thinking on with a 32K-token thinking budget.
 
 | Model | Size | Writes | Reads | HumanEval | Tool calls | Agentic | Context |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **DeepSeek-V4.1-Flash** | 552B MoE | **26.8 tok/s** | **~210 tok/s** (8K prompt) | 21/21 | 10/10 | 3/3 | 512K |
+| **[DeepSeek-V4.1-Flash](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)** | 552B MoE | **26.8 tok/s** | **~210 tok/s** (8K prompt) | 21/21 | 10/10 | 3/3 | 512K |
 | **GLM-5.3-Flash** | 320B MoE | ~28 tok/s | — | numbers coming | | | 512K |
 | **Qwen3.8-Flash-Next** | 125B MoE | **127.8 tok/s** | 475 tok/s* | 21/21 | 10/10 | 3/3 | 200K |
 | **Qwen3.8-27B** (dense) | 27B | **98.5 tok/s** | 1,097 tok/s* | 21/21 | 10/10 | 3/3 | 200K |
@@ -53,7 +53,9 @@ cmake -S . -B build-xolotl -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_C
 ninja -C build-xolotl      # strata, strata-dense, glm_generate, ds41_generate, ds4_generate
 ```
 
-Serve a model (edit the model paths in its config first):
+Get a model: DeepSeek-V4.1-Flash is **[IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)**
+(152 GiB, our GSQ mixed ternary / 2-bit / 3-bit quant - the card has the download and Engram steps). Then serve it
+(edit the model paths in its config first):
 
 ```bash
 python3 tools/v41/serve/serve_ds41.py --engine strata --config tools/v41/serve/strata-ds41.json --port 8150           # DeepSeek-V4.1-Flash
@@ -85,22 +87,15 @@ pruning; the Qwen models get MTP speculative decoding. **[Read the full write-up
 | [Qwen3.8 / upstream Strata](README.strata.md) | the Strata engine this grew from |
 | [Brand kit](docs/brand/XOLOTL_BRAND.md) | logo, banner, palette |
 
-## Lineage and credits
+## Credits
 
-<img src="docs/brand/assets/logo-circle-400.png" alt="Xolotl" width="120" align="right">
+<img src="docs/brand/assets/logo-circle-400.png" alt="Xolotl" width="110" align="right">
 
-Xolotl is an offshoot of **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 (MIT) - the Qwen3.8-Flash-Next
-engine, the server and most of the kernels are Strata's, merged at 0.1.44.1. The Qwen3.8-27B dense port is
-[perronemirko](https://github.com/perronemirko/Strata)'s. The DeepSeek-V4.1 / V4-Flash and GLM-5.3-Flash engines,
-the GSQ quantisation, DSpark serving, the fp4 KV cache and the unification are Indras Mirror's (formerly
-Strata-DSV4.1 and [Strata-GLM](https://github.com/Indras-Mirror/Strata-GLM)). Built on
-[ggml / llama.cpp](https://github.com/ggml-org/llama.cpp). Models: DeepSeek, Zhipu AI (GLM), Qwen; quants and
-fine-tunes by peasantsmith (Maya-S-v2), ukisai (Swift 1.5 GSQ-RCO), d0xin (Swift 1.5 uncensored) and the
-gcsa-abliterix GLM LoRA.
+Built on **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 (its engine, server and kernels, merged at
+0.1.44.1) and [ggml / llama.cpp](https://github.com/ggml-org/llama.cpp); the Qwen3.8-27B dense port is
+[perronemirko](https://github.com/perronemirko/Strata)'s. The DeepSeek-V4.1 and GLM-5.3-Flash engines, the GSQ quant
+and the unification are Indras Mirror's. Model weights: DeepSeek, Zhipu AI, Qwen, with quants and fine-tunes by
+peasantsmith, ukisai, d0xin and gcsa-abliterix.
 
-**Why "Xolotl":** in Aztec myth Xolotl is Quetzalcoatl's dark twin, who goes down into the underworld and carries the
-bones of the dead back up. The engine does the same with experts: they live in the underworld of RAM and NVMe, and
-Xolotl brings up the ones each token needs.
-
-**Status:** research code from one developer, measured on one PC. One request at a time per server. Issues and
-benchmark reports from other hardware are welcome. License: MIT.
+*Xolotl* is Quetzalcoatl's dark twin, who carries the dead up from the underworld - as the engine carries experts up
+from RAM and NVMe. Research code from one developer, measured on one PC; reports from other hardware welcome. MIT.
