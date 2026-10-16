@@ -48,6 +48,9 @@ struct Args {
     double vram_grow_keep = 0.0, vram_margin_gib = 1.0, pcie = 0.25, pf_b = 1.43, arena_gib = 60.0;
     int threads = 0;
     int64_t ctx = 0;
+    float route_bias_file = 0.0f;   // --route-bias-file X: DECODE-only selection penalty -X on file-tier experts
+                                    // (neither VRAM cache nor RAM arena) - soft, every expert stays reachable and keeps
+                                    // its LoRA delta (unlike --skip-*), the ds41 decode recipe (route-bias-file 0.3)
     float temp = 0.0f, route_bias = 0.0f, prune_penalty = 0.0f, skip_miss = 0.0f, skip_file = 0.0f, skip_file_chunk = 0.0f, arena_admit = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
@@ -102,6 +105,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--lora") a.lora = next();
         else if (k == "--ppl") a.ppl = true;
         else if (k == "--route-bias") a.route_bias = (float) std::atof(next().c_str());
+        else if (k == "--route-bias-file") a.route_bias_file = (float) std::atof(next().c_str());
         else if (k == "--vram-lru") a.vram_lru = true;
         else if (k == "--arena-adapt") a.arena_adapt = true;
         else if (k == "--serve") a.serve = true;
@@ -183,7 +187,7 @@ int main(int argc, char ** argv) {
     if (!parse(argc, argv, a)) {
         std::fprintf(stderr, "usage: glm_generate -m model.gguf (--ids 1,2,3 | --ids-file f.i32) [-n 64] [--backend cuda|cpu]\n"
                              "       [--experts gpu|cpu] [--slots auto|N] [--arena-gib 60] [--profile routes.bin] [--vram-lru]\n"
-                             "       [--route-bias X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
+                             "       [--route-bias X] [--route-bias-file X] [--ctx N] [--temp 0] [--stop id,id] [--ppl] [--dump-logits f] [--dump-routes f]\n"
                              "       [--lora adapter.gguf] [--prefill-chunk N [--chunk-mmq] [--chunk-prestage]] [--allow-long-ctx]\n"
                              "       [--prune f [--prune-penalty X]] [--arena-adapt [--arena-admit HALF_LIFE_TOKENS]]\n"
                              "       [--skip-miss T] [--skip-file T] [--skip-file-prefill T] [--renorm-skip] [--arena-lazy] [--vram-grow KEEP_GIB]\n"
@@ -468,21 +472,32 @@ int main(int argc, char ** argv) {
     };
     if (rfile) rblock.assign((size_t) RB * routed_layers.size() * top_k, 0);
 
-    // selection-only bias per layer: -1e30 on pruned experts, + route_bias on resident ones (cache-aware routing)
+    // selection-only bias per layer, the ds41 decode recipe: -1e30 / -prune_penalty on pruned experts always; in
+    // DECODE only (decode_bias) + route_bias on the experts in the VRAM cache and -route_bias_file on file-tier ones
+    // (neither VRAM nor RAM arena).  The prompt routes exactly (prune part only).  Soft: every expert stays reachable
+    // and a chosen expert keeps its full LoRA delta - unlike --skip-*, which drop it (the corrupted tool calls, s5).
+    bool decode_bias = false;
+    const bool dbias = (a.route_bias != 0.0f || a.route_bias_file > 0.0f) && !mc.cpu_only;
     auto set_bias = [&]() {
+        const bool on = dbias && decode_bias;
         for (int l = 0; l < n_layer; ++l) {
             if (!G.routed(l)) continue;
-            for (int64_t e = 0; e < G.n_expert; ++e)
+            for (int64_t e = 0; e < G.n_expert; ++e) {
+                const bool res = on && tier.resident(l, e);
                 rb[(size_t) e] = is_pruned(l, e) ? (a.prune_penalty > 0 ? -a.prune_penalty : -1e30f)
-                               : (a.route_bias != 0.0f && !mc.cpu_only && tier.resident(l, e)) ? a.route_bias : 0.0f;
+                               : (on && a.route_bias != 0.0f && res) ? a.route_bias
+                               : (on && a.route_bias_file > 0.0f && !res && !tier.in_arena(l, e)) ? -a.route_bias_file : 0.0f;
+            }
             dense.set_route_bias(l, rb.data());
         }
     };
+    if (dbias) std::fprintf(stderr, "decode route bias: +%.2f VRAM-resident, -%.2f file-tier (the prompt routes exactly)\n",
+                            a.route_bias, a.route_bias_file);
     if (n_pruned > 0) set_bias();
     double t_ph[5] = { 0, 0, 0, 0, 0 };
     bool timing = false;
     auto step = [&](int tid, int pos) -> bool {
-        if (a.route_bias != 0.0f && !mc.cpu_only) set_bias();
+        if (dbias && decode_bias) set_bias();
         if (!dense.begin_token(tid)) return false;
         int ri = 0;
         for (int l = 0; l < n_layer; ++l) {
@@ -702,6 +717,7 @@ int main(int argc, char ** argv) {
             const double td0 = now_ms();
             int gen = 0, pos = total;
             const char * finish = "length";
+            decode_bias = true;
             while (gen < max_new || max_new <= 0) {
                 if (stop_pending()) { finish = "cancel"; break; }
                 const float * lg = last_logits.data();
@@ -718,6 +734,8 @@ int main(int argc, char ** argv) {
                 ++pos;
             }
             const double dec_ms = now_ms() - td0;
+            if (decode_bias && dbias) { decode_bias = false; set_bias(); }   // the next prompt routes exactly
+            decode_bias = false;
             const ds4::Ds4MoeStats st = tier.stats();
             if (std::strcmp(finish, "error") == 0) {
                 std::fprintf(stderr, "serve: decode failed: %s\n", ferr.c_str());
@@ -754,7 +772,6 @@ int main(int argc, char ** argv) {
         int n = 0;
         for (size_t c0 = 0; c0 < prompt.size(); c0 += (size_t) n) {
             n = dense.safe_chunk((int) c0, (int) std::min<size_t>((size_t) NP, prompt.size() - c0));
-            if (a.route_bias != 0.0f && !mc.cpu_only) set_bias();
             if (!dense.begin_tokens(prompt.data() + c0, n)) { std::fprintf(stderr, "glm_generate: %s\n", dense.last_error().c_str()); return 1; }
             int ri = 0;
             for (int l = 0; l < n_layer; ++l) {
@@ -842,6 +859,9 @@ int main(int argc, char ** argv) {
         std::string gerr;
         if (tier.grow_cache(a.vram_grow_keep, gerr) < 0) { std::fprintf(stderr, "glm_generate: %s\n", gerr.c_str()); return 1; }
     }
+    // GLM_BIAS_PROMPT=1 (one-shot, --prefill-chunk 0): the decode biases on the prompt too - a teacher-forced quality
+    // proxy for --route-bias-file (with --ppl), since the served prompt never takes them
+    if (std::getenv("GLM_BIAS_PROMPT") && a.prefill_chunk <= 0) { decode_bias = true; std::fprintf(stderr, "GLM_BIAS_PROMPT: decode biases on the prompt\n"); }
     for (size_t i = 0; a.prefill_chunk <= 0 && i < prompt.size(); ++i) {
         if (!step(prompt[i], (int) i)) {
             std::fprintf(stderr, "glm_generate: prefill failed at %zu: %s\n", i, dense.last_error().c_str());
@@ -868,6 +888,7 @@ int main(int argc, char ** argv) {
     tier.reset_stats();
     int pos = (int) prompt.size(), n_gen = 0;
     const double t_dec0 = now_ms();
+    decode_bias = true;   // --route-bias-file: decode only
     timing = true;
     static const bool prof_dec = std::getenv("GLM_PROFILE_DECODE") != nullptr;   // nsys --capture-range=cudaProfilerApi
     if (prof_dec) ds4::Ds4MoeTier::profiler(true);
