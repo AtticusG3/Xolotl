@@ -94,6 +94,27 @@ TASKEVAL_MODEL=deepseek-flash TASKEVAL_KEY="$DEEPSEEK_API_KEY" TASKEVAL_NO_EFFOR
 gauntlet's `run_python` tool executes the model's snippet with the workspace as cwd, so every task also needs a
 `max_python_runs` cap in its `task.json`.
 
+## How it is verified before anyone is graded on it
+
+- **`validate.py`** proves, for every task, the three states: the starting workspace FAILS the hidden tests, the
+  `reference/` PASSES both suites, and (where a trap exists) the trap PASSES the visible suite and FAILS hidden.
+- **`selftest.py`** drives the real `run_task` end to end against a canned endpoint: (a) an `answer` task whose final
+  message matches PASSES, (b) one that does not FAILS, (c) a task with neither hidden tests nor an `answer` is
+  refused instead of scored PASS, (d) a real task solved by a canned model PASSES.
+- **Determinism, measured repeatedly (2026-10-16):** the whole gate 3x (30/30 OK), the thread-stress task 10x
+  (06), the two float-heavy tasks 10x each (03, 08), and 01/02/07/10 5x each - **~100 task-validations, zero
+  flakes**.
+- **A fresh checkout validates 10/10** (`git worktree` at HEAD = exactly the tracked file set), so every task file
+  ships - this is what caught `04-log-needle`'s generated log being swallowed by the repo-wide `*.log` ignore rule.
+- **An independent fairness audit** (`~/.quetza-data/conductor/reports/ga-audit-final.md`) mapped all 246 hidden
+  assertions to the sentences that document them and returned **FAIR AS IS**; its four findings are resolved or
+  recorded: R1 (07's unstated trailing newline) fixed, R2 (05's substring `import re` scan -> an `ast` check) fixed,
+  R3 (09's tzdb dependency -> an autouse fixture that fails loudly and records the version) fixed, R4 (03's 60 s
+  wall-clock assertion) removed.
+- **Grading cannot be subverted from the workspace:** the runner refuses names that would let the workspace
+  interfere with grading, strips `conftest.py` / `pytest.ini` / `sitecustomize.py` and stdlib shadows before
+  collecting, and runs every subprocess that touches model code with a six-variable environment (no credentials).
+
 ## Reporting
 
 Per model: pass count /10 (and which), total tokens, wall time, decode tok/s during the run (server timings, as
