@@ -298,3 +298,86 @@ model has been through the hardened set yet.**
   request at a 32K thinking budget). Then the pair to quote is API 3/10 vs quant N/10.
 - **Also still pending Mal's call:** the e2e resume (`verify/e2e/final-think-resume.sh`) for qflash + q27, and the
   push to Strata-DSV4.1.
+
+
+---
+
+# 14. START HERE — the detailed continuation brief (session 4, 2026-10-16 ~19:00)
+
+**Sections 11-13 below are history of how we got here. Read this section, then `TOOLS/GAUNTLET`'s docs, then work the
+list. Nothing is running; the GPU is Mal's (he is gaming) — do not start an engine without him saying so.**
+
+## 14.1 The two projects in this tree
+
+1. **Xolotl** — one engine tree (DeepSeek-V4.1-Flash, GLM-5.3-Flash, Qwen3.8-Flash-Next, Qwen3.8-27B dense + the
+   legacy V4-0731) serving every model, verified against each previous production build. Session 3 finished this; the
+   wrappers point here; **nothing is pushed**.
+2. **The Gauntlet** (`tools/gauntlet/`) — a new 10-task agentic coding benchmark, built and calibrated this session:
+   the full-precision API scores **3/10** on it (8/10 before hardening). This is the session's real deliverable and
+   where the remaining work is.
+
+## 14.2 Read these first (in this order)
+
+```bash
+cat tools/gauntlet/README.md        # what the benchmark is, the 10 tasks, how to run/grade/add one, integrity, limits
+cat tools/gauntlet/DESIGN.md        # the design rules, the task table, the calibration, the verification record
+cat tools/gauntlet/HARDENING.md     # the evidence-backed levers for making tasks hard (with sources) - read before hardening anything
+sed -n '1,80p' HANDOFF.md           # the session-4 block: where everything is, what was verified, the traps
+```
+
+## 14.3 State in one screen
+
+- **Gauntlet: complete, gated, calibrated.** 10 tasks; `validate.py` -> 10x OK; `selftest.py` -> a-e PASS; ~100 repeat
+  validations with **zero flakes**; a fresh checkout validates 10/10; an independent fairness audit returned
+  **FAIR AS IS** over 246 assertions with its four findings all resolved; grading cannot be subverted from the
+  workspace and no credential reaches model code.
+- **Calibration (`out/gauntlet-api-final`, `deepseek-flash`, greedy): 3/10.** PASS **01, 02, 06** — each at the 12-step
+  ceiling and never submitting; FAIL **03, 04, 05, 07, 08, 09, 10**; 246,337 completion tokens, 1,453 s. Recorded in
+  `DESIGN.md`, `HARDENING.md`, `tools/gauntlet/README.md` and this file.
+- **e2e chain: stopped mid-GLM on Mal's instruction.** `r_ds41` complete (21/21 he, 10/10 tool, 3/3 agentic, 26.4 tok/s
+  decode); `r_glm` partial (5 of 21: PASS 0/8/16/24, FAIL 32 at its own 33,792-token ceiling, ~28 tok/s); qflash and
+  q27 never started.
+- **Nothing pushed; `README.md`'s model table has the V4.1 row filled from the measured run and the other three rows
+  explicitly `pending`.**
+
+## 14.4 Next steps, in order
+
+1. **The local quant contrast (the number Mal actually wants).** Needs the GPU free and his go-ahead:
+   ```bash
+   bash verify/e2e/gauntlet-local-ds41.sh        # serves ds41 on 8151, waits, runs the 10 tasks, scores
+   ```
+   Expect **hours** (a 32K thinking budget cost ~20 min for one hard request). Overnight is the right window. Then
+   the quoted pair is **API 3/10 vs quant N/10** — if the quant also fails everything the set needs a task it *can*
+   pass, so check the spread, not just the total.
+2. **Then optionally the e2e remainder** for the README table:
+   ```bash
+   bash verify/e2e/final-think-resume.sh         # qflash, then q27, then score.txt/speed.txt over all four dirs
+   ```
+   Then fill the three `pending` rows in `README.md` from `verify/e2e/final-think/score.txt` + `speed.txt`.
+3. **If a task proves too easy in either run, harden it** — one `flash` worker per task via `qc-dispatch` with a
+   packet, gate = `validate.py <that task>` + a derivability table (every hidden assertion -> the documented sentence
+   that states it). Follow `HARDENING.md`; do **not** tighten a step budget to force failures.
+4. **The push** to `Indras-Mirror/Strata-DSV4.1` — only on Mal's explicit OK, and decide first whether
+   `RESUME_PROMPT.md` / `HANDOFF.md` (they carry local paths) ship or stay out, and keep `tasks/*/hidden/` out of any
+   public leaderboard.
+
+## 14.5 Rules for this project (Mal's standing constraints)
+
+- **Measure before concluding**: a worker's "verified" is a claim — re-run the gate on a settled tree. Report
+  `file:line` / command output, not impressions.
+- **Do not run models without being asked**, and **never start an engine while the GPU is in use** — check
+  `nvidia-smi` and ask.
+- **Never run the full `validate.py` while a slice is editing its task dir** (it reads half-written trees).
+- **Never `pkill -f` with a pattern that matches your own command line** (it has killed my own shell twice); kill by
+  exact PID, or `tmux kill-session -t qc-<slice>` for workers.
+- **Commit as you land each slice** — a reboot has already wiped uncommitted `/tmp` work once; verify the diff and the
+  gate yourself before committing.
+- **Nothing destructive or public without an explicit OK** (push, delete, model files, the README's public shape).
+
+## 14.6 Acceptance for "this project is done"
+
+- One clean full-set Gauntlet run on the API and one on a local quant, whose numbers are quoted in `README.md` and
+  `DESIGN.md` (the API row is already there: 3/10).
+- The README's four model rows all filled from real runs (V4.1 done, GLM/qflash/q27 pending).
+- The fresh-clone build test (session 3's S3.5) passed — the last release blocker for the engine side.
+- Mal's explicit go for the push.
