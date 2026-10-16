@@ -1,4 +1,6 @@
-"""CI runs these in a random order (pytest-randomly) and fails about one run in three; locally (file order) they pass."""
+"""CI runs these in a random order (pytest-randomly) and fails about one run in three;
+locally - file order - they all pass.  The service is used by other code too.
+"""
 import inventory as inv
 
 
@@ -9,19 +11,17 @@ def test_add_and_total():
     assert inv.total() == 5
 
 
-def test_tags_are_per_item():
+def test_empty_tags_are_not_shared_between_items():
     inv.reset()
-    a = inv.add_item("bolt", 10)
-    b = inv.add_item("nut", 5)
-    a.append("metal")
+    inv.add_item("nut", 1)
     assert inv.add_item("nut", 1) == []
+    assert inv.tagged("metal") == []
 
 
-def test_tagged_only_lists_stock():
+def test_tagged_finds_stock():
     inv.reset()
-    inv.add_item("kiwi", 1, ["fruit"])
-    inv.remove_item("kiwi", 1)
-    assert inv.tagged("fruit") == []
+    inv.add_item("kiwi", 1, ["produce"])
+    assert inv.tagged("produce") == ["kiwi"]
 
 
 def test_remove():
@@ -29,3 +29,10 @@ def test_remove():
     inv.add_item("bolt", 4)
     inv.remove_item("bolt", 4)
     assert inv.total() == 0
+
+
+def test_appending_to_the_returned_list_does_not_tag_the_item():
+    inv.reset()
+    a = inv.add_item("screw", 1)
+    a.append("metal")
+    assert inv.tagged("metal") == []

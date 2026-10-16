@@ -1,4 +1,22 @@
-"""A tiny inventory service (the module our flaky CI suite tests)."""
+"""A tiny inventory service (the module our flaky CI suite tests).
+
+Documented behaviour - every function, for every caller:
+
+  reset()                forget every item AND every tag (tests call this first)
+  add_item(name, qty, tags=[])   qty must be > 0, else ValueError.  Adds qty units of name (creating the
+                         item if new).  The item's tags are the union of the tags it already had and
+                         `tags`, each tag listed once.  Returns the item's tag list.
+  remove_item(name, qty) qty must not exceed the stock, else ValueError.  When the stock reaches 0 the
+                         item is gone - and so is its tag.
+  tagged(tag)            names of the items currently IN STOCK that carry tag, sorted.
+  total()                the sum of the stock of every item.
+
+Two rules that are easy to get wrong, because they are about identity, not values:
+
+  * the `tags` argument is COPIED into the item: the caller may keep the list and mutate it afterwards
+    and the item must not change.  Two calls that pass no tags at all must not end up sharing one list.
+  * the list add_item returns is a COPY too: appending to it must not change the item or its tags.
+"""
 
 _items = {}
 _by_tag = {}

@@ -1,0 +1,4 @@
+{"id": "10-flaky-suite", "category": "agentic debug",
+ "prompt": "CI is flaky: test_inventory.py passes locally in file order but fails about one run in three there, because CI runs the tests in a random order. Find the cause in inventory.py and fix it properly - the tests are read-only, do not add retries or sleeps, and other code depends on every documented behaviour in inventory.py, not just on what these tests assert. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 8,
+ "trap": "fix only the shared default argument (per-call list) so the visible suite goes green in every order; reset() still leaks the tag index, removal still leaves the tag behind, and the caller's list / the returned list are still the item's own list"}
