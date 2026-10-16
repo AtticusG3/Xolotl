@@ -3,13 +3,16 @@
 
 This drives the REAL runner (`gauntlet.run_task`) in a subprocess against a canned OpenAI-shaped endpoint
 (`http.server`, 127.0.0.1:<free port>), so nothing here reimplements the runner - it is the runner's own answer,
-hidden-test and no-grader paths that are under test. Four checks, one line each; exit 0 only if all four hold:
+hidden-test and no-grader paths that are under test. Five checks, one line each; exit 0 only if all five hold:
 
   a) an exact-answer task whose canned final message MATCHES "answer" -> PASS
   b) the same task, canned message that does NOT match                 -> fail
   c) a task with no hidden/ and no "answer"                            -> a loud failure, never a silent pass
   d) the real 01-ledger-rootcause, driven by a canned model that writes the reference solution -> PASS
      (the hidden-test path is unharmed)
+  e) the same real task, driven by a canned model that tries to grade itself: write_file is refused for
+     conftest.py / pytest.ini / decimal.py, a conftest.py planted through run_python is stripped before the
+     hidden run, and the hidden run reports the REAL result (13 failures) instead of a green 33 passed
 
   python3 tools/gauntlet/selftest.py
 """
@@ -55,6 +58,11 @@ def reply(content, calls=None):
 
 def call(cid, name, args):
     return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+# A conftest.py that neuters every collected test: with it in the workspace the honest
+# "13 failed, 20 passed" of 01-ledger-rootcause becomes a green "33 passed" (measured).
+POISON = "def pytest_collection_modifyitems(config, items):\n    for it in items:\n        it.obj = lambda *a, **k: None\n"
 
 
 def make_task(root, name, meta, files=None):
@@ -115,6 +123,25 @@ def main() -> int:
             r = drive(url, real, [reply("", [call("c1", "write_file", {"path": p, "content": c}) for p, c in ref.items()]),
                                   reply("fixed parse_amount", [call("c2", "submit", {"note": "done"})])])
             results.append(("d) real 01-ledger-rootcause, canned reference solution -> PASS", r["ok"] is True))
+
+            # e) the workspace must not be able to grade itself. Both drives leave the bug UNFIXED, so the
+            #    honest hidden result is a fail; anything green here means the plant decided the grade.
+            plants = [call("c1", "write_file", {"path": "conftest.py", "content": POISON}),
+                      call("c2", "write_file", {"path": "pytest.ini", "content": "[pytest]\naddopts = -p no:cacheprovider\n"}),
+                      call("c3", "write_file", {"path": "decimal.py", "content": "# shadow the stdlib module\n"}),
+                      call("c4", "write_file", {"path": "json.pyc", "content": "# sourceless shadow\n"})]
+            r = drive(url, real, [reply("", plants), reply("nothing written", [call("c5", "submit", {"note": "done"})])])
+            refused = {x["path"] for x in r["integrity"]["refused"]}
+            e_refused = (refused == {"conftest.py", "pytest.ini", "decimal.py", "json.pyc"} and r["ok"] is False
+                         and all("interfere with grading" in x["reason"] for x in r["integrity"]["refused"]))
+            # run_python is code, not a path check, so this plant lands - and must be stripped before grading
+            r = drive(url, real, [reply("", [call("c1", "run_python", {"code": f"open('conftest.py', 'w').write({POISON!r})"})]),
+                                  reply("planted, still broken", [call("c2", "submit", {"note": "done"})])])
+            e_stripped = (r["integrity"]["removed"] == ["conftest.py"] and r["ok"] is False
+                          and "failed" in r["hidden_output"] and "passed" in r["hidden_output"])
+            results.append((f"e) workspace cannot grade itself: refused {sorted(refused)} as 'interfere with "
+                            f"grading', stripped {r['integrity']['removed']} -> real hidden result kept "
+                            f"({r['hidden_output'].strip().splitlines()[-1][:40]!r})", e_refused and e_stripped))
     finally:
         srv.shutdown()
     for line, ok in results:

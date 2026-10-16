@@ -10,6 +10,10 @@ submit; after it submits (or runs out of steps) the hidden tests are copied in a
 A task whose task.json carries "answer" (an exact-answer task: no workspace, no hidden tests) is graded instead on
 whether that regex matches the model's final assistant message. A task with neither hidden tests nor an answer is
 ungradable and fails loudly - it is never scored PASS by accident.
+
+The workspace may not decide the grade: write_file refuses the names below (see _write_refusal), anything planted
+another way is stripped before the hidden run (_strip_grading_names), and every subprocess that runs model-supplied
+code gets a minimal environment (_child_env) so the harness's credentials are never in reach of a snippet.
 """
 import json
 import os
@@ -37,19 +41,104 @@ SYSTEM = ("You are a careful senior engineer working as a coding agent in a smal
           "through the tools. The visible tests are not the whole grade: hidden tests check the documented behaviour. "
           "Fix causes, not symptoms. Call submit when you are done.")
 
+# --- grading integrity: the one place these two lists live ------------------------------------------------
+# The staged workspace IS the rootdir of the pytest that grades the task and is on sys.path for it (pytest
+# inserts every test file's basedir; the hidden tests land in the workspace root). A file planted there can
+# therefore rewrite the grade instead of earning it - a conftest.py with a pytest_collection_modifyitems hook
+# turns 01-ledger-rootcause's "13 failed, 20 passed" into a green "33 passed" without a line of real work.
+GRADING_CONFIG_NAMES = frozenset({
+    "conftest.py",        # loaded before collection; hooks can skip, rewrite or fake every test
+    "pytest.ini",         # pytest's own config for the grading run (testpaths, addopts, -p plugin autoload)
+    "pyproject.toml",     # idem (and [tool.pytest.ini_options])
+    "setup.cfg",          # idem
+    "tox.ini",            # idem
+    "setup.py",           # executed by packaging tooling; never a task deliverable
+    "sitecustomize.py",   # imported at interpreter start of every subprocess, including pytest's
+    "usercustomize.py",   # idem
+})
+# The stdlib top-level modules the tasks import (hidden tests included), so a workspace module of the same
+# name would shadow the real one for them:
+#   grep -rhoE '^\s*(import|from) [A-Za-z_]\w*' tasks --include=*.py | sed -E 's/^\s*(import|from) +//' | sort -u
+STDLIB_SHADOW_NAMES = frozenset({
+    "ast", "collections", "csv", "datetime", "decimal", "functools", "io", "itertools", "json", "math", "os",
+    "pathlib", "pytest", "random", "re", "shutil", "signal", "sys", "threading", "time", "unittest", "zoneinfo",
+})
+INTERFERE = "that name would let the workspace interfere with grading"
+
+
+def _shadow_name(parts: tuple[str, ...]) -> str | None:
+    """The stdlib module this workspace-relative path would shadow, or None. Covers `json.py`, a `json/`
+    package directory, and a sourceless `json.pyc` (measured: a bare .pyc at the top of the search path
+    does resolve as `import json`); a nested `sub/json.py` is refused too - harmless in today's tasks, but
+    the rule stays one line instead of a path-depth argument."""
+    for i, part in enumerate(parts):
+        name = part
+        if i == len(parts) - 1:
+            for suffix in (".py", ".pyc"):
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+        if name in STDLIB_SHADOW_NAMES:
+            return name
+    return None
+
+
+def _write_refusal(d: Path, p: Path | None) -> str | None:
+    """Why write_file must refuse the resolved workspace path `p`, or None if the write is allowed.
+
+    Refusals are plain error strings, never exceptions: a model that trips one should read the reason and
+    work around it, not have the run die. None of these names is a deliverable of any of the ten tasks, so
+    a legitimate model loses nothing (validate.py proves every task still stages and grades unchanged).
+    """
+    if p is None or p.name.startswith("test_"):
+        return "error: tests are read-only (and paths must name a file inside the workspace)"
+    rel = p.relative_to(d)
+    if p.name in GRADING_CONFIG_NAMES:
+        return (f"error: refusing to write {rel}: {INTERFERE} (the harness loads {p.name} from the workspace "
+                "when it grades you)")
+    shadow = _shadow_name(rel.parts)
+    if shadow:
+        return (f"error: refusing to write {rel}: {INTERFERE} (it would shadow the stdlib module '{shadow}', "
+                "which the tests import)")
+    return None
+
+
+def _strip_grading_names(d: Path) -> list[str]:
+    """Delete any workspace entry that could hijack grading, just before the hidden tests are copied in.
+
+    write_file refuses these names, but a snippet run through run_python can still create them (it is code,
+    not a path check), and the interpreter-start hook sitecustomize.py is loaded by the grading pytest itself.
+    The model's own modules are never named one of these, so stripping them cannot cost a real solution."""
+    gone = []
+    for p in sorted(d.iterdir()):
+        if p.name in GRADING_CONFIG_NAMES or _shadow_name(p.relative_to(d).parts):
+            gone.append(p.name)
+            shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+    return gone
+
+
+def _child_env(home: Path) -> dict[str, str]:
+    """The environment for every subprocess that runs model-supplied code (run_python, and both pytests,
+    which import the model's modules).
+
+    This shell carries DEEPSEEK_API_KEY and a dozen other credentials; inheriting os.environ would hand them
+    to a snippet the model wrote. Pass exactly these six variables and nothing else."""
+    return {"PATH": os.environ.get("PATH", ""), "HOME": str(home), "PYTHONPATH": "",
+            "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8", "TMPDIR": str(home)}
+
 
 def _pytest(d: Path, hidden: bool) -> tuple[bool, str]:
     files = sorted(str(p.relative_to(d)) for p in d.rglob("test_*.py") if p.name.startswith("test_hidden_") == hidden)
     if not files:
         return True, "no tests"
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *files], cwd=d,
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=300, env=_child_env(d))
     return r.returncode == 0, (r.stdout + r.stderr)[-4000:]
 
 
 def _safe(d: Path, p: str) -> Path | None:
     q = (d / p.lstrip("/")).resolve()
-    return q if str(q).startswith(str(d.resolve())) and q != d.resolve() else None
+    s = str(d.resolve())
+    return q if (str(q) == s or str(q).startswith(s + os.sep)) and q != d.resolve() else None
 
 
 def _grade_answer(pattern, text: str) -> tuple[bool, str]:
@@ -73,6 +162,7 @@ def run_task(url: str, task: Path) -> dict:
     answer, final_content = meta.get("answer"), ""
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": meta["prompt"]}]
     log, toks, secs, test_runs, py_runs, submitted = [], 0, 0.0, 0, 0, False
+    integrity = {"refused": [], "removed": []}  # what the workspace tried to do to its own grade
     for _ in range(meta.get("max_steps", 12)):
         j = T.chat(url, msgs, TOOLS, max_tokens=4096)
         toks += j.get("usage", {}).get("completion_tokens", 0)
@@ -99,8 +189,9 @@ def run_task(url: str, task: Path) -> dict:
                     res = f"error: cannot read {a.get('path')}: {e}"
             elif name == "write_file":
                 p = _safe(d, a.get("path", ""))
-                if not p or p.name.startswith("test_"):
-                    res = "error: tests are read-only (and paths must name a file inside the workspace)"
+                res = _write_refusal(d, p)
+                if res:
+                    integrity["refused"].append({"path": a.get("path", ""), "reason": res})
                 else:
                     try:
                         p.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +209,7 @@ def run_task(url: str, task: Path) -> dict:
                 else:
                     try:
                         r = subprocess.run([sys.executable, "-c", a.get("code", "")], cwd=d, capture_output=True,
-                                           text=True, timeout=20)
+                                           text=True, timeout=20, env=_child_env(d))
                         res = (r.stdout + r.stderr)[-4000:] or "(no output)"
                     except subprocess.TimeoutExpired:
                         res = "error: timed out after 20 s"
@@ -135,11 +226,12 @@ def run_task(url: str, task: Path) -> dict:
         ok, out = False, (f"error: task {meta['id']} has no hidden test_hidden_*.py files and no 'answer' key - "
                           "nothing can grade it; refusing to report a silent pass")
     else:
+        integrity["removed"] += _strip_grading_names(d)  # plant a harness file and it is gone before it can grade
         shutil.copytree(task / "hidden", d, dirs_exist_ok=True)
         ok, out = _pytest(d, True)
     shutil.rmtree(d, ignore_errors=True)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
-            "tokens": toks, "secs": round(secs, 1), "hidden_output": out[-1500:], "log": log}
+            "tokens": toks, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
 
 
 def run(url, out, only):
@@ -151,6 +243,7 @@ def run(url, out, only):
             r = run_task(url, t)
         except Exception as e:  # a task must never abort the whole run (it still has to be scored)
             r = {"id": t.name, "ok": False, "submitted": False, "steps": 0, "test_runs": 0, "tokens": 0, "secs": 0.0,
+                 "integrity": {"refused": [], "removed": []},
                  "hidden_output": f"runner error: {e!r}", "log": []}
         res.append(r)
         print(f"{r['id']}: {'PASS' if r['ok'] else 'fail'} ({r['steps']} steps, {r['tokens']} tok, {r['secs']:.0f}s)", flush=True)
