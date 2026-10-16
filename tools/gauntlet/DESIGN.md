@@ -63,16 +63,14 @@ applied, and FAIL with `trap/` applied (so the trap is tempting AND caught).
 | 09 | dst-scheduler | time zones / real-world spec | DST-correct scheduling: a skipped local time must raise, a repeated one is resolved by `fold`, a local day is 23/24/25 h, plus an exact `agenda()` serialization (each line carries the offset in force at that instant and real minutes across a change), a shipped `blackouts.txt` whose precedence over the busy list and the minimum-notice rule is documented, and weekly local-time recurrences. Trap: `zoneinfo` silently shifting a nonexistent time, a 24 h day | 37 hidden cases; grading asserts the tzdb resolves and records its version |
 | 10 | flaky-suite | agentic debug | three documented modules (`inventory`, `pricing`, `orders`) with one contract; the visible suite is green in EVERY order (no free symptom - 60/60 shuffled orders on the starting workspace), while the buried faults include a hold that is priced once at reserve time and must not follow the world. Trap: fix the in-module faults (aliased tag lists, stale index) and stop - the cross-module ones still fail | the visible suite in 20 shuffled orders + ~35 contract assertions (60 cases) |
 
-**Calibrated 2026-10-16** against the full-precision API (`deepseek-flash` = V4.1-Flash, greedy, no effort
-override): **8/10 in 12 minutes** (114,210 completion tokens, 700 s) - it fails only **03-raytracer** and
-**05-regex-engine**, and it walked 01 in 9 steps, 02 in 7, 09 in 12, 10 in 12. That is too easy to show what a
-quant loses, so the tasks it passed were hardened: 01 (three modules + a reconcile invariant), 02 (SemVer replaced
-by an invented release-ordering spec), 04 (several rules + a key->tenant join + an exemptions file), 06 (`peek`/
-`stats`/invented purge order + a thread stress test), 07 (dialect by header signature + rates normalisation pinned
-by a 1-cent case + a duplicate rule), 08 (C/Q/A curves with a documented flattening rule), 09 (recurring local-time
-meetings + `find_slots`), 10 (queued). Target: the API fails about **7 of 10**, so the gap to a damaged quant is
-measurable. **A task every model passes is too easy - replace it; one the references pass and every model fails 3
-runs in a row is fine** (keep at most 2 of those).
+**Calibration (2026-10-16, `deepseek-flash` = V4.1-Flash, greedy, no effort override).** The first pass scored
+**8/10** - it failed only 03-raytracer and 05-regex-engine - which is too easy to show what a quant loses, so every
+task it passed was hardened (later 09 and 10 a second time). Per task, measured after its hardening:
+**FAIL 01, 03, 04, 05, 06, 08; PASS 09 (12 steps) and 10 (9 steps)** - and 09/10 have been hardened again since that
+measurement, while **02 and 07 were last measured before their final changes**. The set therefore needs one clean
+full-set re-measure before any number is quoted; the target is the API failing about 7 of 10 with the local
+quants below it, i.e. a spread rather than a wall. **A task every model passes is too easy - replace it; one the
+references pass and every model fails 3 runs in a row is fine** (keep at most 2 of those).
 
 ## Running it
 
