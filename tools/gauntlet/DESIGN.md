@@ -24,7 +24,8 @@ native default).
 4. **Original.** Written for this benchmark (not HumanEval/MBPP/SWE-bench text), so it is not in training data.
    Do not publish the hidden tests in the same repo as a public leaderboard (keep `hidden/` out of the public
    push or rotate tasks).
-5. **Bounded.** max 12 agent steps, max 6 `run_tests` calls, the model's own token budget; workspace <= ~400 lines;
+5. **Bounded.** max 12 agent steps (14 for the two graphics tasks - 03 and 08 - whose engines are bigger; the cap
+   is per task in `task.json`), max 6 `run_tests` calls, the model's own token budget; workspace <= ~400 lines;
    prompt + files <= ~12K tokens (one long-context task may go to ~24K).
 6. **Validated before use.** `validate.py` proves for every task: the hidden tests FAIL on the starting workspace,
    PASS with `reference/` applied, and (if the task has a trap) FAIL with `trap/` applied. A task that a reference
