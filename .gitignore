@@ -74,3 +74,6 @@ build-vision-cuda12.bat
 /.ccache/
 /.rocm-win/
 out/
+
+# generated task data that must ship with the benchmark (the repo-wide *.log rule would drop it)
+!tools/gauntlet/tasks/*/workspace/*.log

@@ -1,0 +1,6 @@
+# Exemptions (gateway v3). A request inside a range here is NOT counted against any limit.
+# Ranges are left-closed, right-open (from <= t < to) and in UTC.
+#
+#   tenant  from                   to                     reason
+hooli    2026-10-16T03:06:40Z   2026-10-16T03:07:00Z   planned maintenance: key rotation
+stark    2026-10-16T03:10:40Z   2026-10-16T03:10:50Z   failover drill
