@@ -194,10 +194,10 @@ def run_task(url: str, task: Path) -> dict:
                 break
             step_cap = min(max_tokens, budget - toks)
         if tb_env:  # chat() adds the thinking budget on top of the answer's: split this step's cap between them
-            answer = min(4096, step_cap // 2)
-            os.environ["TASKEVAL_THINK_BUDGET"] = str(max(256, min(tb_env, step_cap - answer)))
+            ans_cap = min(4096, step_cap // 2)   # NOT `answer`: that is the exact-answer task's pattern (graded below)
+            os.environ["TASKEVAL_THINK_BUDGET"] = str(max(256, min(tb_env, step_cap - ans_cap)))
             try:
-                j = T.chat(url, msgs, TOOLS, max_tokens=answer)
+                j = T.chat(url, msgs, TOOLS, max_tokens=ans_cap)
             finally:
                 os.environ["TASKEVAL_THINK_BUDGET"] = str(tb_env)
         else:
