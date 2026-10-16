@@ -33,21 +33,10 @@ tokens (within each engine's own run-to-run variation), the 27B's teacher-forced
 nats on average, and the server builds byte-identical engine prompts for every model.
 
 
-## The Gauntlet (`tools/gauntlet`)
-
-HumanEval-21 is saturated (every model above scores 21/21), so it cannot show what a quantisation or an engine
-change costs. [The Gauntlet](../../tools/gauntlet/README.md) is a small set of hard, machine-graded agentic coding tasks
-(spec precision, root-cause debugging, graphics math, concurrency, data wrangling, competitive programming) with
-hidden tests, a trap per task, and a runner whose grading cannot be subverted from the workspace. v2 gives every
-model 10 turns per task with no token budget, grades the hidden tests after every turn, and scores progress from
-each task's starting state (no free credit) plus the turn each task was solved on. Results per model are in its
-README.
-
 ## Measuring it yourself
 
 ```bash
 python3 tools/taskeval/taskeval.py run http://127.0.0.1:<port> out && python3 tools/taskeval/taskeval.py score out
 python3 tools/taskeval/taskeval.py speed out          # prefill / decode tok/s during those tasks
 python3 tools/turnbench.py http://127.0.0.1:<port>    # the cost of a small agent turn on a long context
-python3 tools/gauntlet/gauntlet.py run http://127.0.0.1:<port> out/g && python3 tools/gauntlet/gauntlet.py score out/g
 ```

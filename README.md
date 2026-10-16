@@ -81,7 +81,6 @@ pruning; the Qwen models get MTP speculative decoding. **[Read the full write-up
 | --- | --- |
 | [How Xolotl works](docs/xolotl/HOW_IT_WORKS.md) | the three memory tiers, per-model engines, the server, the agent-loop work |
 | [Benchmarks](docs/xolotl/BENCHMARKS.md) | every measured number, exactness checks, how to measure your own PC |
-| [The Gauntlet](tools/gauntlet/README.md) | our hard agentic coding benchmark (HumanEval is saturated) |
 | [DeepSeek-V4.1-Flash engine](docs/DEEPSEEK_V41.md) | GSQ quantisation, DSpark, the fp4 KV cache, Engram |
 | [GLM-5.3-Flash engine](docs/glm) | KDA + MLA attention, the LoRA on routed experts, soft pruning |
 | [Qwen3.8 / upstream Strata](README.strata.md) | the Strata engine this grew from |
