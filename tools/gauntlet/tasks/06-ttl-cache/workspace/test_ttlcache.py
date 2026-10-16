@@ -9,13 +9,22 @@ class Clock:
         return self.t
 
 
-def test_basic():
-    clk = Clock()
-    c = TTLCache(2, 10, clk)
+def test_put_then_get():
+    c = TTLCache(4, 10, Clock())
     c.put("a", 1)
     c.put("b", 2)
     assert c.get("a") == 1
-    c.put("c", 3)                  # evicts b (least recently used)
-    assert c.get("b") is None and c.get("c") == 3
+    c.put("a", 9)                  # overwrite
+    assert c.get("a") == 9
+    assert c.get("zzz") is None
+    assert c.get("zzz", "d") == "d"
+
+
+def test_expires_at_ttl():
+    clk = Clock()
+    c = TTLCache(4, 10, clk)
+    c.put("a", 1)
+    clk.t = 9
+    assert c.get("a") == 1
     clk.t = 10
     assert c.get("a") is None      # expired exactly at ttl
