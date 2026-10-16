@@ -1,3 +1,51 @@
+# Xolotl — HANDOFF (2026-10-17, session 5 — CURRENT; session 4 and earlier below are history)
+**State in one line:** every Xolotl model has now run the Gauntlet core set and the HumanEval e2e; README's two Qwen
+rows are filled; GLM's served config was found to corrupt tool calls under its skip/prune approximations (the merge is
+clean); the small-turn prefill fix (716cf901) is in `build-pf` only. **Nothing pushed.**
+
+## S5.1 What session 5 did (overnight 2026-10-16/17)
+1. **Fixed a runner bug that graded every LOCAL Gauntlet task as a runner error** (5ed4adf8): with
+   `TASKEVAL_THINK_BUDGET` set, the per-step answer cap overwrote the exact-answer pattern `answer`, so grading called
+   `re.search(<int>)`. API runs never set it, so every earlier API number stands. `selftest.py` gains case **f** (the
+   local path; the pre-fix runner dies on it) (751a4ab0).
+2. **`gauntlet.py score` reports throughput** (918f7b55): decode, prefill over NEW prompt tokens, new/reused, e2e.
+3. **Gauntlet core set (03,12,13,14,15,16; 12K tokens/task) on all models + the API** - table in
+   `tools/gauntlet/README.md` (d54ef113): API 1/6, qflash 1/6, q27 0/6, ds41 0/6, GLM served 0/6, GLM exact 1/6.
+   Results: `verify/e2e/gauntlet-local/<model>/`, `out/gauntlet-core-api/`, `verify/e2e/gauntlet-local/score.txt`.
+4. **HumanEval e2e remainder**: qflash and q27 both 21/21 he, 10/10 tool, 3/3 agentic; decode 127.8 / 98.5 tok/s
+   -> README rows (b9c605a3). `taskeval.py score/speed` over `r_glm` crashes (the 5-problem partial has no
+   results.json) - score the other dirs explicitly.
+5. **GLM A/B** (scratch, `/tmp/claude-1000/.../scratchpad/glmab/`): Gauntlet 13/14 step-1 requests replayed greedy on
+   A Xolotl served config, B pre-merge `~/AI/Strata-Backup/Strata-GLM` build same flags, C/D the two trees with exact
+   routing. C == D (identical on 14; same tool calls on 13) -> **no merge bug**. Malformed calls only under
+   `--skip-miss/--skip-file/--skip-file-prefill 0.15 --renorm-skip --prune prune-ezct-0.25 --prune-penalty 0.05`.
+   Gauntlet with exact routing (`gauntlet-local-all.sh glm-exact`): 0 malformed of 39 calls (served: 3 of 27), the
+   table's only 03 pass - but decode 10.1 vs 30.6 tok/s.
+6. ds41 Gauntlet ran on **`build-pf`** (has the prefill fix); `build-xolotl/ds41_generate` is from 14:52 (pre-fix) and
+   its CMakeCache still points STRATA_GGML_DIR at the moved `~/AI/Strata-DS4` - rebuild it before relying on it.
+
+## S5.2 Open (needs Mal)
+- **GLM's served config**: keep the fast approximations (30 tok/s, corrupt calls) or serve exact routing (10 tok/s,
+  clean)? Or something between (e.g. skip thresholds only on prefill). Mal's rule: soft prune only - `--skip-*` drops
+  experts outright.
+- **The core set barely separates models** (13/15/16 zero for all; 12 only free credit). Hardening rule says replace
+  tasks nobody passes 3x - candidates for the next calibration.
+- **Wrappers** `strata-ds41-quetza` / `strata-glm-quetza` check `build-ds4-gpu/` / `build-glm-gpu/`, which do not exist
+  in Xolotl - launching through them likely fails (untested this session).
+- **Adaptive arena** (`STRATA_ARENA_REBAL=1`, off by default, uncommitted in ds41_moe.cpp/.hpp, ds41_generate.cpp,
+  turnbench.py): see S5.3.
+
+## S5.3 Adaptive arena (in progress)
+Committed opt-in (5429b5ad, `STRATA_ARENA_REBAL=1`, off by default). The size-aware planner fixed the "slot small"
+rejections (s4: 3,178 of 3,178): now 2,561 swaps, all published, 0 bad under `DS41_CHECK_ARENA=1`. On the turnbench
+agent schedule (4K base, 8 turns, `--gap 20`): file-tier experts per small turn -21..-30%, small-turn wall time
+8.48 -> 7.60 s (-10%); the simulated ceiling was -35..-45%. Logits are not bit-identical when on (MMVQ vs MMQ by
+residency), so the gate is byte checks + an output-quality run: `verify/e2e/final-think/r_ds41_rebal` (HumanEval/tool/
+agentic with it on, session 5) - compare with `r_ds41` before making it default.
+Next levers: more swaps per gap (`end_batch`, `per_tick`), and the prompt's own reads overlapping the dense phase
+(s4 item 1, predicted router) - not started.
+
+---
 # Xolotl — HANDOFF (2026-10-16, session 4 — CURRENT; sessions 1-3 below are history)
 **State in one line:** the engine work is unchanged from session 3 (one tree, four models, verified); session 4 built
 and calibrated **The Gauntlet** — a new 10-task agentic benchmark in `tools/gauntlet/` where the full-precision API
