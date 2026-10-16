@@ -24,14 +24,15 @@ server's own per-request timings **during those tasks**, not a synthetic benchma
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | **DeepSeek-V4.1-Flash** | 552B MoE | [GSQ mixed 1.75-3.4 bpw, uncensored](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored) (152 GiB) | 512K | 21/21 | 10/10 | 3/3 | 26 tok/s | 26.4 tok/s |
 | **GLM-5.3-Flash** | 320B MoE | Maya-S-v2 IQ2_XXS + abliteration LoRA (96 GB) | 512K | pending | pending | pending | pending | ~28 tok/s |
-| **Qwen3.8-Flash-Next** | 125B MoE | Swift 1.5 SC117 GSQ-RCO IQ3_XXS, abliterated | 200K | pending | pending | pending | pending | pending |
-| **Qwen3.8-27B** (dense) | 27B | Swift 1.5 uncensored IQ3_S + MTP head (13 GB) | 200K | pending | pending | pending | pending | pending |
+| **Qwen3.8-Flash-Next** | 125B MoE | Swift 1.5 SC117 GSQ-RCO IQ3_XXS, abliterated | 200K | 21/21 | 10/10 | 3/3 | 475 tok/s | 127.8 tok/s |
+| **Qwen3.8-27B** (dense) | 27B | Swift 1.5 uncensored IQ3_S + MTP head (13 GB) | 200K | 21/21 | 10/10 | 3/3 | 1,097 tok/s | 98.5 tok/s |
 
 DeepSeek-V4.1-Flash is complete: 21/21 HumanEval, 10/10 tool calls, 3/3 agentic, 63,402 answer tokens in 2,973 s,
 prefill 26 tok/s (short HumanEval prompts - not a representative prefill figure), decode **26.4 tok/s**. GLM-5.3-Flash
 was stopped mid-run (5 of 21 HumanEval problems: four passes of 37-893 s, one failure at its own 33,792-token
-ceiling, decoding ~28 tok/s); the two Qwen rows have not run yet. The remaining three run with
-`verify/e2e/final-think-resume.sh`.
+ceiling, decoding ~28 tok/s). Qwen3.8-Flash-Next: 21/21, 10/10, 3/3, 30,809 answer tokens in 275 s, decode
+**127.8 tok/s**; Qwen3.8-27B: 21/21, 10/10, 3/3, 30,722 answer tokens in 319 s, decode **98.5 tok/s** (2026-10-17;
+the prefill column is again short HumanEval prompts).
 
 Also built and verified: the earlier **DeepSeek-V4-Flash (0731)** engine (`ds4_generate`, 284B MoE, Q2 GGUF):
 19.4 tok/s decode, 600-token perplexity 10.39 (the previous engine's runs: 10.41-10.51).
