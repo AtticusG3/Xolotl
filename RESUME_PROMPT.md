@@ -210,3 +210,56 @@ workers are in flight to raise its difficulty; the 4-model e2e chain is still ru
 - **Nothing pushed.** Commits this session: `02acb010` (task 10), `ee0610ea` (API knobs), `80290ee2` (DESIGN table),
   `0ef1e51a` (runner robustness: a bad tool path or one task's exception can no longer kill a run), `82d1aa64`
   (answer grading + selftest). `README.md` is still dirty on purpose - its table waits on the e2e chain.
+
+
+---
+
+## 12. UPDATE — session 4 continued (2026-10-16 ~18:00): e2e chain STOPPED mid-GLM, Gauntlet frozen + hardened
+
+**Mal's call at 17:54: kill the HumanEval e2e run; the rest resumes later.** Done as asked - it finished the
+problem it was on, then stopped:
+
+- **ds41 e2e: COMPLETE** - `verify/e2e/final-think/r_ds41.out`, 21/21 HumanEval, 10/10 tools, 3/3 agentic, 63,402
+  tok, 2,973 s, prefill 26 tok/s, **decode 26.4 tok/s** (`taskeval.py score/speed`).
+- **GLM e2e: STOPPED, 5 of 21 HumanEval attempted** - `verify/e2e/final-think/r_glm.out`:
+  `HumanEval/0 PASS 75s` · `/8 PASS 37s` · `/16 PASS 35s` · `/24 PASS 893s (25,446 tok)` ·
+  `/32 **fail** 1203s (33,792 tok = its own max_tokens ceiling)`. The tool cases and agentic loops never ran.
+- **qflash and q27 never started.** The GPU is free again (744 MiB).
+- **Resume the chain later with:** `bash verify/e2e/final-think-resume.sh` - it runs ONLY qflash then q27 on the
+  same port/config/paths as the original driver and then writes `score.txt`/`speed.txt` over all four dirs (the
+  GLM row stays the 5-problem partial; re-running GLM means re-running its block in `final-think.sh`).
+  Both that script and `verify/e2e/gauntlet-local-ds41.sh` live under `verify/`, which `.git/info/exclude` deliberately
+  keeps out of the repo - local files on this machine, NOT part of a fresh clone (which is why the gitignore trap on
+  `04-log-needle/workspace/service.log` had to be fixed with a repo-level negation instead).
+- **Note on the thinking budget (Mal is right, and it matters):** `TASKEVAL_THINK_BUDGET=32768` sets
+  `reasoning_budget_tokens` - an ALLOWANCE a thinking model may spend, not a forced spend. GLM is the one that
+  spends it (25,446 tok on HumanEval/24), and HumanEval/32 failed because its 33,792 max_tokens ceiling cut the
+  answer off. A model that stops thinking earlier is never penalised.
+
+**The Gauntlet is FROZEN and hardened** (all commits on `xolotl`, nothing pushed): 8 tasks strengthened in two
+waves, each slice worker-verified AND re-verified by the conductor (`validate.py` per task + a derivability table
+mapping every hidden assertion to the documented sentence). `validate.py` over all 10: **10x OK, exit 0**
+(`/tmp/ga-frozen-gate.log`), and `selftest.py` a/b/c/d all PASS after check (d) was re-pointed at the three-module
+task 01.
+
+**Measured difficulty against `deepseek-flash`** (the control; a task it passes shows no quant gap):
+
+| task | before | after hardening |
+| --- | --- | --- |
+| 01 ledger | PASS 9 steps | **FAIL** 12 steps / 22.4K tok |
+| 02 release-order | PASS 7 steps | PASS 9 steps -> wave 2: 3 surfaces, 57 hidden tests |
+| 03 raytracer | FAIL | FAIL (untouched) |
+| 04 log-needle | PASS 12 steps | measured (`out/gauntlet-api-rest`) |
+| 05 regex-engine | FAIL | FAIL (untouched) |
+| 06 ttl-cache | PASS 10 steps | measured (`out/gauntlet-api-rest`) |
+| 07 csv-money | PASS 10 steps | PASS at the 12-step ceiling, never submitted -> wave 2: running balance |
+| 08 svg-raster | PASS 12 steps | **FAIL** 14 steps / **45.6K tok** |
+| 09 dst-scheduler | PASS 12 steps | measured (`out/gauntlet-api-rest`) |
+| 10 flaky-suite | PASS 12 steps | measured (`out/gauntlet-api-rest`) |
+
+**Running right now:** (a) `verify/e2e/gauntlet-local/ds41/` - the LOCAL ds41 through the same frozen Gauntlet
+(`bash verify/e2e/gauntlet-local-ds41.sh`; think budget 32768) - this is the API-vs-quant contrast; (b) the
+fairness/determinism audit `ga-audit-final` -> `~/.quetza-data/conductor/reports/ga-audit-final.md`.
+
+**Next:** finish the two measurements, then a single clean full-set API run for the official /10, then the README
+table from `score.txt`/`speed.txt` (ds41 done, GLM partial, qflash/q27 to run), and the fresh-clone build test.
