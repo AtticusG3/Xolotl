@@ -45,7 +45,7 @@ def _pytest(d: Path, hidden: bool) -> tuple[bool, str]:
 
 def _safe(d: Path, p: str) -> Path | None:
     q = (d / p.lstrip("/")).resolve()
-    return q if str(q).startswith(str(d.resolve())) else None
+    return q if str(q).startswith(str(d.resolve())) and q != d.resolve() else None
 
 
 def run_task(url: str, task: Path) -> dict:
@@ -73,15 +73,21 @@ def run_task(url: str, task: Path) -> dict:
                                        and "__pycache__" not in p.parts))
             elif name == "read_file":
                 p = _safe(d, a.get("path", ""))
-                res = p.read_text() if p and p.is_file() else f"error: no such file {a.get('path')}"
+                try:
+                    res = p.read_text() if p and p.is_file() else f"error: no such file {a.get('path')}"
+                except OSError as e:
+                    res = f"error: cannot read {a.get('path')}: {e}"
             elif name == "write_file":
                 p = _safe(d, a.get("path", ""))
                 if not p or p.name.startswith("test_"):
-                    res = "error: tests are read-only (and paths must stay in the workspace)"
+                    res = "error: tests are read-only (and paths must name a file inside the workspace)"
                 else:
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(a.get("content", ""))
-                    res = f"wrote {len(a.get('content', ''))} bytes to {p.relative_to(d)}"
+                    try:
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_text(a.get("content", ""))
+                        res = f"wrote {len(a.get('content', ''))} bytes to {p.relative_to(d)}"
+                    except OSError as e:
+                        res = f"error: cannot write {a.get('path')}: {e}"
             elif name == "run_tests":
                 test_runs += 1
                 res = "error: test-run limit reached" if test_runs > meta.get("max_test_runs", 6) else _pytest(d, False)[1]
@@ -115,7 +121,11 @@ def run(url, out, only):
     tasks = sorted(p for p in (HERE / "tasks").iterdir() if p.is_dir() and (not only or p.name[:2] in only))
     res = []
     for t in tasks:
-        r = run_task(url, t)
+        try:
+            r = run_task(url, t)
+        except Exception as e:  # a task must never abort the whole run (it still has to be scored)
+            r = {"id": t.name, "ok": False, "submitted": False, "steps": 0, "test_runs": 0, "tokens": 0, "secs": 0.0,
+                 "hidden_output": f"runner error: {e!r}", "log": []}
         res.append(r)
         print(f"{r['id']}: {'PASS' if r['ok'] else 'fail'} ({r['steps']} steps, {r['tokens']} tok, {r['secs']:.0f}s)", flush=True)
     json.dump({"tasks": res, "timings": T.TIMINGS}, open(os.path.join(out, "gauntlet.json"), "w"), indent=1)
