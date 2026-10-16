@@ -70,6 +70,8 @@ OUTPUT - UTF-8, '\n' line ends, exactly these lines
   [total] then '<base>,<net>' - the grand total, the sum of every kept row;
   [duplicates] then 'file,date,account,net' then one row per dropped duplicate
   ('file' its base name, 'net' the 2-decimal normalised amount).
+  The file ends with a newline: every line above, the last one included, is
+  terminated by '\n', so the text is the lines joined by '\n' plus a final '\n'.
 """
 
 

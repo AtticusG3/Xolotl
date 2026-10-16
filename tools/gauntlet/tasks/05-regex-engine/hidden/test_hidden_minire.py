@@ -75,6 +75,14 @@ def test_no_catastrophic_backtracking(pat, text):
 
 
 def test_does_not_use_re():
+    import ast
     import os
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "minire.py")).read()
-    assert "import re" not in src and "from re" not in src and "import regex" not in src
+    modules = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            modules |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    roots = {m.lstrip(".").split(".")[0] for m in modules}
+    assert not (roots & {"re", "regex"}), f"minire.py imports a regex library: {sorted(roots & {'re', 'regex'})}"
