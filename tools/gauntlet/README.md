@@ -22,6 +22,35 @@ total - 03 fails one scene, 07 and 10 fail two cases, 04 fails two assertions; 0
 collapse. That is deliberate: the frontier sits on the task set, so a quantized engine falls below it rather than
 falling off a cliff.
 
+## Measured on every Xolotl model (2026-10-17, core set, 12K tokens per task)
+
+The **core set** is 03, 12, 13, 14, 15, 16 under `GAUNTLET_TASK_TOKENS=12000` (thinking included, identical for every
+engine) so one model costs at most 72K completion tokens; local engines think with `TASKEVAL_THINK_BUDGET=32768`.
+`bash verify/e2e/gauntlet-local-all.sh [ds41 qflash q27 glm glm-exact]`; the API row is
+`GAUNTLET_TASK_TOKENS=12000 ... gauntlet.py run https://api.deepseek.com out/gauntlet-core-api --only 03,12,13,14,15,16`.
+
+| run | pass | partial | truncated | tokens | wall s | decode tok/s | prefill tok/s (new) | e2e tok/s | passed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| API `deepseek-flash` | 1/6 | 1.57 | 2 | 65,277 | 398 | - | - | 164.1 | 14 |
+| Qwen3.8-Flash-Next (qflash) | 1/6 | 1.57 | 2 | 62,688 | 464 | 148.6 | 940.5 | 135.1 | 14 |
+| Qwen3.8-27B (q27) | 0/6 | 0.57 | 2 | 69,513 | 716 | 104.9 | 512.9 | 97.0 | - |
+| DeepSeek-V4.1-Flash (ds41) | 0/6 | 0.57 | 0 | 62,305 | 3,685 | 21.5 | 92.4 | 16.9 | - |
+| GLM-5.3-Flash, served config | 0/6 | 0.07 | 6 | 72,000 | 2,505 | 30.6 | 172.9 | 28.7 | - |
+| GLM-5.3-Flash, exact routing | 1/6 | 1.07 | 4 | 70,390 | 7,362 | 10.1 | 138.8 | 9.6 | 03 |
+
+Read it with these facts (each checked):
+- **12's 0.07 is free**: the untouched starting stub already passes 1 of its 14 hidden tests; no run implemented the
+  codec (`NotImplementedError` everywhere). **03's 0.50 is real**: the start scores 0/2, every run but GLM's renders
+  scene A and fails scene B (`test_matches_reference[B-scene1]`); only GLM with exact routing cleared both.
+- **The core set barely separates the models**: one pass at most per run, and 13/15/16 are zero for everyone. A task
+  that nobody passes three runs in a row adds nothing but cost - see DESIGN.md's rule.
+- **GLM's served config corrupts tool calls.** Its row ran out of budget on all six tasks and emitted byte-salad call
+  names (`<tool_call>function\nlist\n</think>...`, mojibake after `<tool_call>`), 3 malformed of 27 calls. A greedy A/B
+  of the failing requests (pre-merge `Strata-GLM` build vs Xolotl, both with and without the approximations) showed
+  the two trees give the same tool calls with exact routing (identical on 14), and the malformed calls appear only
+  with `--skip-miss/--skip-file/--skip-file-prefill 0.15 --renorm-skip --prune ... --prune-penalty 0.05` on. Without
+  them: 0 malformed of 39 calls and the only 03 pass in the table - at a third of the decode speed.
+
 ## Run it
 
 ```bash
