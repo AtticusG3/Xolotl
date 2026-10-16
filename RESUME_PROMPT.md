@@ -152,3 +152,24 @@ python3 tools/gauntlet/gauntlet.py run URL DIR [--only 01,02] ; gauntlet.py scor
 bash verify/stub-ab.sh <tag> <shim> <config> [cwd]      # serve-level: GEN lines from a stub engine (STUB_STOP_ID=<eos>)
 strata-ds41-quetza / strata-glm-quetza / strata-quetza / strata-dense-quetza   # Mal's wrappers (Xolotl)
 ```
+
+## 10. UPDATE 17:15 (end of session 3) — read this first
+
+- **README run, DSV4.1 done (thinking, 32K budget):** HumanEval **21/21**, tools **10/10**, agentic **3/3**; during the
+  tasks: prefill 26 tok/s (short prompts - not representative), decode **26.4 tok/s**; 63,402 tokens, 2,973 s.
+  GLM started 17:12, then Qwen Flash, then 27B (`verify/e2e/final-think.log`).
+- **Gauntlet:** tasks 01-09 written AND validated (`python3 tools/gauntlet/validate.py` -> all OK):
+  01 ledger root-cause, 02 semver, 03 ray tracer (pixel-compared, graphics), 04 log needle (20K tok, long context),
+  05 regex engine (fuzz vs re + no catastrophic backtracking), 06 TTL+LRU cache (threads), 07 CSV money (3 dialects),
+  08 SVG raster (nonzero/evenodd, graphics), 09 DST scheduler. Runner has a `run_python` tool now.
+  **Task 10 (flaky-suite) is WIP:** only `workspace/` exists, and its visible tests currently fail even in file order
+  (2 of 4) - they must PASS in file order and fail only in some orders. Fix the test design (e.g. make
+  `test_tags_are_per_item` / `test_tagged_only_lists_stock` order-dependent only), then write `reference/inventory.py`
+  (default `tags=None` + copy, `reset()` clears `_by_tag`, remove drops the name from `_by_tag`), `trap/` (fix only the
+  mutable default), `hidden/test_hidden_order.py` (import the visible test functions and run them in 30 seeded
+  shuffled orders), and `task.json`. Then validate.
+- **Then (Mal asked):** run the Gauntlet on the DeepSeek API (`deepseek-flash` = V4.1-Flash; Mal OKed API use for this):
+  give `tools/taskeval/taskeval.py`'s chat() the env knobs from `verify/e2e/api/taskeval_api.py` (TASKEVAL_MODEL,
+  TASKEVAL_KEY -> Authorization header; drop `reasoning_effort: none`; URL https://api.deepseek.com), run
+  `python3 tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api`, then the same on local DSV4.1
+  (strata-ds41-quetza, port 8150). Goal: the API should fail several tasks; replace any task everything passes.
