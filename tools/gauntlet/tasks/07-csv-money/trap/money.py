@@ -1,43 +1,113 @@
-"""Totals per account from bank exports (THE TRAP: the C summary row is counted as an account)."""
+"""Consolidate bank exports into one money report - THE TRAP.
+
+Everything is right except the rounding rule: the normalised amount is NOT
+quantized per row; the raw products are summed and only each group's / account's
+/ the grand total is quantized once at the end.  The visible test (structure only)
+passes; the hidden per-row rounding and the exact report fail.
+"""
 import csv
-from decimal import Decimal, InvalidOperation
+import os
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 
-HEADERS = {("date", "account", "description", "amount"): ",", ("datum", "konto", "beschreibung", "betrag"): ";",
-           ("posted", "account", "memo", "amount"): "\t"}
+CENT = Decimal("0.01")
+DELIMS = (",", ";", "\t")
+DIALECTS = [("A", ("date", "account", "description", "amount")),
+            ("B", ("datum", "konto", "beschreibung", "betrag")),
+            ("C", ("posted", "account", "memo", "amount"))]
 
 
-def _amount(fmt, s):
+def _rates(path):
+    base, rates = None, {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, val = line.partition(":")
+            key, val = key.strip(), val.strip()
+            if key == "base":
+                base = val
+            else:
+                rates[key] = Decimal(val)
+    return base, rates
+
+
+def _detect(first_line):
+    line = first_line.lstrip("\ufeff")
+    for delim in DELIMS:
+        cells = next(csv.reader([line], delimiter=delim))
+        names = tuple(c.strip().lower() for c in cells)
+        for dialect, fields in DIALECTS:
+            if names == fields:
+                return dialect, delim
+    raise ValueError(f"unknown export header: {first_line.strip()!r}")
+
+
+def _number(dialect, s):
     s = s.strip()
+    if dialect == "A":
+        neg, s = s.startswith("-"), s[1:] if s.startswith("-") else s
+        s = s.replace(",", "")
+    elif dialect == "B":
+        neg, s = s.startswith("-"), s[1:] if s.startswith("-") else s
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        neg, s = s.endswith("-"), s[:-1] if s.endswith("-") else s
     try:
-        if fmt == ",":
-            neg = s.startswith("-")
-            s = s.lstrip("-").lstrip("$").replace(",", "")
-            d = Decimal(s)
-            return -d if neg else d
-        if fmt == ";":
-            neg = s.startswith("-")
-            d = Decimal(s.lstrip("-").replace(".", "").replace(",", "."))
-            return -d if neg else d
-        neg = s.endswith("-")
-        d = Decimal(s.rstrip("-"))
-        return -d if neg else d
+        d = Decimal(s)
     except InvalidOperation:
         raise ValueError(f"bad amount {s!r}") from None
+    return -d if neg else d
 
 
-def account_totals(path):
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        first = f.readline()
-        for head, sep in HEADERS.items():
-            cells = next(csv.reader([first], delimiter=sep))
-            if tuple(c.strip().lower() for c in cells) == head:
-                break
-        else:
-            raise ValueError("unknown export format")
-        totals = {}
-        for row in csv.reader(f, delimiter=sep):
-            if not row or all(not c.strip() for c in row):
-                continue
-            acct = row[1].strip()
-            totals[acct] = totals.get(acct, Decimal("0")) + _amount(sep, row[3])
-    return {k: v.quantize(Decimal("0.01")) for k, v in totals.items()}
+def _cell(dialect, cell):
+    num, _, code = cell.strip().rpartition(" ")
+    if len(code) != 3 or not code.isalpha() or not code.isupper():
+        raise ValueError(f"bad currency code: {cell!r}")
+    return _number(dialect, num), code
+
+
+def _money(value):
+    return f"{value.quantize(CENT, rounding=ROUND_HALF_EVEN):.2f}"
+
+
+def build_report(data_dir, out_path):
+    base, rates = _rates(os.path.join(data_dir, "rates.yaml"))
+    files = sorted(f for f in os.listdir(data_dir) if f != "rates.yaml"
+                   and os.path.isfile(os.path.join(data_dir, f)))
+    months, accounts, dups = {}, {}, []
+    grand = Decimal("0.00")
+    for name in files:
+        with open(os.path.join(data_dir, name), newline="", encoding="utf-8-sig") as f:
+            dialect, delim = _detect(f.readline())
+            seen = set()
+            for row in csv.reader(f, delimiter=delim):
+                if not row or all(not c.strip() for c in row):
+                    continue
+                date, acct = row[0].strip(), row[1].strip()
+                if dialect == "C" and acct == "TOTAL":
+                    continue
+                amount, code = _cell(dialect, row[3])
+                if code not in rates:
+                    raise ValueError(f"unknown currency {code!r}")
+                norm = amount * rates[code]  # TRAP: no per-row quantization
+                key = (date, acct, norm)
+                if key in seen:
+                    dups.append((name, date, acct, norm))
+                    continue
+                seen.add(key)
+                month = date[:7]
+                m = months.setdefault((acct, month), [Decimal("0.00"), 0])
+                m[0], m[1] = m[0] + norm, m[1] + 1
+                a = accounts.setdefault(acct, [Decimal("0.00"), 0])
+                a[0], a[1] = a[0] + norm, a[1] + 1
+                grand += norm
+    lines = ["[account-month]", "account,month,net,count"]
+    lines += [f"{acct},{month},{_money(months[(acct, month)][0])},{months[(acct, month)][1]}"
+              for acct, month in sorted(months)]
+    lines += ["[account]", "account,net,count"]
+    lines += [f"{acct},{_money(accounts[acct][0])},{accounts[acct][1]}" for acct in sorted(accounts)]
+    lines += ["[total]", f"{base},{_money(grand)}", "[duplicates]", "file,date,account,net"]
+    lines += [f"{name},{date},{acct},{_money(norm)}" for name, date, acct, norm in dups]
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
