@@ -1,0 +1,4 @@
+{"id": "08-svg-raster", "category": "graphics / geometry",
+ "prompt": "Implement rasterize() in raster.py exactly as its docstring specifies (an SVG path subset, filled with the nonzero or even-odd rule, sampled at pixel centres). Hidden tests compare whole rasters - stars, donuts with both subpath directions, relative commands, implicit line-tos - character for character. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 6, "max_python_runs": 12,
+ "trap": "ignoring the fill rule (even-odd everywhere) fills the star's centre wrong and the same-direction donut's hole; also: relative commands after Z, implicit L after M, the half-open crossing rule"}

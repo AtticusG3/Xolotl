@@ -1,0 +1,4 @@
+{"id": "06-ttl-cache", "category": "data structures + concurrency + time",
+ "prompt": "Implement TTLCache in ttlcache.py exactly as its docstring specifies (LRU + time-to-live + thread safety). Hidden tests check every documented rule with a fake clock and hammer it from 8 threads. Use the tools; when you are done, call submit.",
+ "max_steps": 10, "max_test_runs": 6,
+ "trap": "evicting the least recently used entry while expired entries still take up capacity; also: get extending expiry, __contains__ changing recency, expiry at exactly ttl"}

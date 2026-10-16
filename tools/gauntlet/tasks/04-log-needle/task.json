@@ -1,0 +1,4 @@
+{"id": "04-log-needle", "category": "long context / data reasoning",
+ "prompt": "service.log is the API gateway's log for one hour; limits.yaml holds the rate-limit rule (read ALL of it, including the comments). Exactly one request in the log violates the rate limit. Find it and write its request id (the req= value, 8 hex digits) - and nothing else - to ANSWER.txt. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 4, "max_python_runs": 10,
+ "trap": "a closed window [t, t+10] flags wayne's 6th request (exactly 10.000 s after its 1st); also: counting ops / /health, skipping 429s, chasing the ERROR burst"}

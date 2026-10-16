@@ -1,0 +1,4 @@
+{"id": "05-regex-engine", "category": "algorithms + performance",
+ "prompt": "Implement fullmatch(pattern, text) in minire.py exactly as its docstring specifies - including the performance requirement. A hidden suite fuzzes it against Python's re.fullmatch and runs pathological patterns under a time limit. You may not import re (or any regex library) in minire.py. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 6, "max_python_runs": 12,
+ "trap": "a recursive backtracking matcher passes every correctness case and hangs on (a*)*b / (a|aa)*c"}

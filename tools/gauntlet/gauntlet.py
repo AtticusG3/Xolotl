@@ -26,6 +26,8 @@ TOOLS = [fn("list_files", "List the workspace's files.", {}),
          fn("write_file", "Create or overwrite a workspace file (tests are read-only).",
             {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
          fn("run_tests", "Run the workspace's visible pytest tests; returns their output (truncated).", {}),
+         fn("run_python", "Run a Python snippet with the workspace as the current directory (20 s limit); returns "
+            "stdout + stderr (truncated).", {"code": {"type": "string"}}, ["code"]),
          fn("submit", "Finish: your work is graded now.", {"note": {"type": "string"}})]
 SYSTEM = ("You are a careful senior engineer working as a coding agent in a small Python workspace. You can only act "
           "through the tools. The visible tests are not the whole grade: hidden tests check the documented behaviour. "
@@ -51,7 +53,7 @@ def run_task(url: str, task: Path) -> dict:
     d = Path(tempfile.mkdtemp(prefix="gauntlet-run-"))
     shutil.copytree(task / "workspace", d, dirs_exist_ok=True)
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": meta["prompt"]}]
-    log, toks, secs, test_runs, submitted = [], 0, 0.0, 0, False
+    log, toks, secs, test_runs, py_runs, submitted = [], 0, 0.0, 0, 0, False
     for _ in range(meta.get("max_steps", 12)):
         j = T.chat(url, msgs, TOOLS, max_tokens=4096)
         toks += j.get("usage", {}).get("completion_tokens", 0)
@@ -83,6 +85,17 @@ def run_task(url: str, task: Path) -> dict:
             elif name == "run_tests":
                 test_runs += 1
                 res = "error: test-run limit reached" if test_runs > meta.get("max_test_runs", 6) else _pytest(d, False)[1]
+            elif name == "run_python":
+                py_runs += 1
+                if py_runs > meta.get("max_python_runs", 12):
+                    res = "error: run_python limit reached"
+                else:
+                    try:
+                        r = subprocess.run([sys.executable, "-c", a.get("code", "")], cwd=d, capture_output=True,
+                                           text=True, timeout=20)
+                        res = (r.stdout + r.stderr)[-4000:] or "(no output)"
+                    except subprocess.TimeoutExpired:
+                        res = "error: timed out after 20 s"
             elif name == "submit":
                 submitted, res = True, "submitted"
             else:

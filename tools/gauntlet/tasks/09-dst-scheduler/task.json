@@ -1,0 +1,4 @@
+{"id": "09-dst-scheduler", "category": "time zones / real-world spec",
+ "prompt": "Implement to_utc, has_conflict and free_minutes in scheduler.py exactly as its docstring specifies. Hidden tests cover both daylight-saving changes of 2026 in Melbourne (and one in New York): skipped and repeated wall-clock times, real vs wall-clock durations, and 23/25-hour days. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 6, "max_python_runs": 12,
+ "trap": "zoneinfo silently maps a skipped time (02:30 -> 03:30) instead of raising, and a local day is assumed to be 24 h"}

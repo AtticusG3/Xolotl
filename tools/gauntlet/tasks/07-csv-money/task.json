@@ -1,0 +1,4 @@
+{"id": "07-csv-money", "category": "data wrangling",
+ "prompt": "Implement account_totals(path) in money.py exactly as its docstring specifies. data/ holds one export of each format; hidden tests check exact per-account totals on these and on other exports of the same three formats. Use the tools; when you are done, call submit.",
+ "max_steps": 12, "max_test_runs": 6, "max_python_runs": 12,
+ "trap": "counting format C's TOTAL summary row as an account; also: float sums, the BOM, German decimal commas, trailing minus, quoted newlines"}
