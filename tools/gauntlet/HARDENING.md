@@ -32,7 +32,8 @@ Sources read 2026-10-16 (summarised; every claim below is from one of them):
 3. **Trivialised-variant / non-standard semantics (Unpuzzles).** Where a model is likely recalling a known spec,
    document a twist that invalidates the memorised answer: invented precedence, an inverted tie-break, a
    half-open-vs-closed boundary that differs from the standard library's, a channel order that is not alphabetical.
-   Task 02 already does this; **05 is the obvious next one** (its current spec is Python's `re`, i.e. pure recall).
+   Task 02 does this; **05 now does too** (its old spec was Python's `re` - pure recall - and it now pins possessive/
+   longest-once semantics, line-wise anchors, `.` matching newlines and an invented operator).
 4. **Superficially similar but logically distinct**: put *pairs* of near-identical rules in one task and pin both
    sides in hidden tests, so a model that pattern-matches one clause fails the other. Cheap to add to any task that
    already has a rule list. *Applies to 04, 07, 09.*
