@@ -43,6 +43,52 @@ channel name), "1.0.0~alpha" (no such channel), "1.0.0~beta." (empty REVISION),
 "1.0.0~beta.01" (leading zero), "1.0.0@us~beta" ("@" before "~"), "1.0.0@US"
 (upper case) - and compare() raises it for any argument that is not a valid
 stamp string.
+
+Two further surfaces must agree with this same ordering.
+
+  IDENTITY. A release's identity is the tuple (EPOCH, MAJOR, MINOR, CHANNEL,
+  REVISION) - the fields the ordering compares, taken as written (channel None
+  when absent, revision 0 when absent). REGION is NOT part of the identity: it
+  never takes part in precedence, so "1.2.0~rc@us" and "1.2.0~rc@eu" are the
+  SAME release, and two stamps have equal precedence exactly when their
+  identities are equal.
+
+  merge(catalog, incoming) returns a NEW list: the union of the two, sorted
+  ascending by precedence. Every stamp in either argument must be valid, else
+  ValueError.
+
+    * A single argument may not name the same release twice. Two stamps with
+      equal identity inside one list raise ValueError, whether they are written
+      identically or differ only in their REGION.
+    * A release named in BOTH arguments is a duplicate and appears ONCE, and the
+      surviving spelling is the one from catalog - merge never rewrites a
+      release that already exists. (This is what stability buys: merge assembles
+      catalog then incoming, sorts stably, and keeps the first spelling seen for
+      each identity.)
+    * Nothing else is deduplicated, and after this no two survivors can compare
+      equal: equal precedence means equal identity.
+
+  select(stamps, constraint) returns a new list of the stamps of `stamps` that
+  satisfy `constraint`, in ascending precedence order and stable for stamps of
+  equal precedence; every stamp in the list must be valid and `constraint` must
+  be a string, else ValueError. The grammar, and nothing beyond it:
+
+    ""        every stamp.  ".."  every stamp.
+    "A"       the stamps whose IDENTITY equals A's - so "1.2.0~rc" selects
+              "1.2.0~rc", "1.2.0~rc.0" and any REGION of it alike.
+    "A..B"    A <= s < B by precedence: the LOW bound is INCLUSIVE and the HIGH
+              bound is EXCLUSIVE.  "A.."  s >= A.   "..B"  s < B.
+    "^A"      the same ERA as A and a channel at or after A's. The ERA is the
+              pair (EPOCH, MAJOR) and the test is "same ERA and channel rank
+              >= rank(A)"; MINOR and REVISION are unconstrained. "^1.2.0~rc" is
+              every release with EPOCH 1 and MAJOR 2 whose channel is rc,
+              stable, absent or hotfix, at any MINOR.
+
+  A constraint that is not exactly one of those forms raises ValueError - an
+  unknown operator such as ">=1.0.0", a "^" with no anchor, more than one "..",
+  or a bound that is not a valid stamp. Because merge is precisely the union and
+  select precisely the filter, select(merge(a, b), c) lists exactly the releases
+  of select(a, c) and select(b, c) together, each release once.
 """
 import functools
 import re
@@ -81,10 +127,19 @@ def parse(stamp):
     return int(m[1]), int(m[2]), int(m[3]), channel, revision, region if at else None
 
 
+def _identity(stamp):
+    epoch, major, minor, channel, revision, _ = parse(stamp)
+    return epoch, major, minor, channel, revision
+
+
 def _key(stamp):
     epoch, major, minor, channel, revision, _ = parse(stamp)
     rank = _NO_CHANNEL_RANK if channel is None else _CHANNEL_RANK[channel]
     return major, minor, rank, revision, -epoch
+
+
+def _rank(channel):
+    return _NO_CHANNEL_RANK if channel is None else _CHANNEL_RANK[channel]
 
 
 def compare(a, b):
@@ -99,3 +154,50 @@ def sort_versions(stamps):
     """Return the stamps sorted ascending by precedence, stable for equal precedence
     (stamps that compare equal keep their input order)."""
     return sorted(stamps, key=functools.cmp_to_key(compare))
+
+
+def merge(catalog, incoming):
+    """Return the union of the two valid stamp lists, sorted ascending by precedence:
+    same-identity stamps inside one list raise ValueError, a release named in both is
+    kept once spelling it as catalog does. See the module docstring."""
+    for stamps in (catalog, incoming):
+        seen = set()
+        for stamp in stamps:
+            ident = _identity(stamp)
+            if ident in seen:
+                raise ValueError(f"release listed twice: {ident!r}")
+            seen.add(ident)
+    out, seen = [], set()
+    for stamp in sort_versions(list(catalog) + list(incoming)):
+        ident = _identity(stamp)
+        if ident not in seen:
+            seen.add(ident)
+            out.append(stamp)
+    return out
+
+
+def select(stamps, constraint):
+    """Return the valid stamps the constraint grammar admits, ascending by precedence.
+    ValueError for an invalid stamp or a constraint that is not one of the documented
+    forms. See the module docstring."""
+    if not isinstance(constraint, str):
+        raise ValueError("a constraint must be a string")
+    entries = [(stamp, _identity(stamp), _key(stamp)) for stamp in stamps]
+    if constraint in ("", ".."):
+        keep = lambda ident, key: True
+    elif ".." in constraint:
+        if constraint.count("..") > 1:
+            raise ValueError(f"bad constraint {constraint!r}")
+        low, _, high = constraint.partition("..")
+        low_key = _key(low) if low else None
+        high_key = _key(high) if high else None
+        keep = lambda ident, key: ((low_key is None or key >= low_key)
+                                   and (high_key is None or key < high_key))
+    elif constraint.startswith("^"):
+        epoch, major, _, channel, _, _ = parse(constraint[1:])
+        floor = _rank(channel)
+        keep = lambda ident, key: (ident[0], ident[1]) == (epoch, major) and _rank(ident[3]) >= floor
+    else:
+        target = _identity(constraint)
+        keep = lambda ident, key: ident == target
+    return sort_versions([stamp for stamp, ident, key in entries if keep(ident, key)])

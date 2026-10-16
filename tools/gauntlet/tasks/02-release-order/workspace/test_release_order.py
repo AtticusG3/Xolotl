@@ -1,4 +1,4 @@
-from release_order import compare, parse, sort_versions
+from release_order import compare, merge, parse, select, sort_versions
 
 
 def test_parse_basic():
@@ -14,3 +14,11 @@ def test_compare_major_and_minor():
 
 def test_sort_basic():
     assert sort_versions(["1.1.0~stable", "1.0.5~stable"]) == ["1.0.5~stable", "1.1.0~stable"]
+
+
+def test_merge_basic():
+    assert merge(["1.0.0~dev"], ["1.1.0~dev"]) == ["1.0.0~dev", "1.1.0~dev"]
+
+
+def test_select_basic():
+    assert select(["1.0.5~stable", "1.2.0~stable"], "1.0.0..1.1.0") == ["1.0.5~stable"]
