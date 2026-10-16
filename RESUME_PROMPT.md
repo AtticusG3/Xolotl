@@ -263,3 +263,36 @@ fairness/determinism audit `ga-audit-final` -> `~/.quetza-data/conductor/reports
 
 **Next:** finish the two measurements, then a single clean full-set API run for the official /10, then the README
 table from `score.txt`/`speed.txt` (ds41 done, GLM partial, qflash/q27 to run), and the fresh-clone build test.
+
+
+---
+
+## 13. UPDATE - session 4, benchmark-hardening phase COMPLETE (2026-10-16 ~18:30)
+
+**"Get the benchmark perfect before running models through it" is done. Nothing is running; the GPU is free; no
+model has been through the hardened set yet.**
+
+- **All 10 tasks hardened** (commits on `xolotl`, nothing pushed): 01 three-module ledger (33 hidden cases), 02
+  `release-order` with three consistent surfaces (57), 03 raytracer (plus the audit's wall-clock assert removed),
+  04 scaled to 12 ids in a 948-line log with a cross-footing count table and a one-clause exemption pair, 05
+  un-puzzled regex semantics - possessive/longest-once, line-wise anchors, `.` matching newlines, an invented `~`
+  (123), 06 cache with the purge-order contract and an 8-thread stress (58 asserts), 07 dialects + per-row rounding
+  + a running balance (22), 08 curves and elliptical arcs with a documented N=32 flattening rule (38 cases),
+  09 an exact `agenda()` + `blackouts.txt` + minimum notice (37), 10 three-module flaky hunt (60).
+- **Verification, all re-run by the conductor on the settled tree:** `validate.py` **10/10 OK**; `selftest.py` a-e
+  all PASS (e = the workspace cannot grade itself); ~100 repeat task-validations with **zero flakes** (whole gate 3x,
+  06 10x, 03/08 10x each, 01/02/07/10 5x each); a **fresh worktree at HEAD validates 10/10**; an independent
+  fairness audit returned **FAIR AS IS** over 246 assertions with R1-R4 resolved.
+- **Not gameable from the workspace:** `write_file` refuses - and the pre-grading strip removes - `conftest.py`,
+  `pytest.ini`, `sitecustomize.py` and every stdlib shadow the tasks import (`.py`, sourceless `.pyc`, package dirs,
+  any path component). Measured: a planted `conftest.py` flipped 01's honest "13 failed, 20 passed" to a green
+  "33 passed" before the fix. Every model-touching subprocess now runs with six variables (no credentials), proven
+  by a probe that dumps `os.environ` from inside `run_python`.
+- **The one thing left is a measurement, and it is a model run:** 02 and 07 were last measured BEFORE their final
+  hardening; every other task's post-hardening API result is known (FAIL: 01, 03, 04, 05, 06, 08; PASS: 09, 10 -
+  and 09/10 have since been hardened again, so those need re-measuring too). Mal said stop model runs until the
+  benchmark is perfect - it now is. Next: `TASKEVAL_MODEL=deepseek-flash TASKEVAL_KEY="$DEEPSEEK_API_KEY"
+  TASKEVAL_NO_EFFORT=1 python3 tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api-final`,
+  then the same on a local engine (`bash verify/e2e/gauntlet-local-ds41.sh`), then fill README/DESIGN from it.
+- **Also still pending Mal's call:** the e2e resume (`verify/e2e/final-think-resume.sh`) for qflash + q27, and the
+  push to Strata-DSV4.1.
