@@ -107,8 +107,11 @@ def main() -> int:
             results.append((f"c) no hidden/ + no answer -> loud failure, not a pass ({r['hidden_output'][:60]!r})", loud))
 
             real = HERE / "tasks" / "01-ledger-rootcause"
-            ref = {rel: (real / "reference" / rel).read_text()
-                   for rel in ("ledger/parse.py", "ledger/report.py")}
+            refdir = real / "reference"
+            # Discover every reference file from the directory (never hard-code), so this fixture
+            # cannot go stale when the real task grows another module.
+            ref = {p.relative_to(refdir).as_posix(): p.read_text()
+                   for p in sorted(refdir.rglob("*")) if p.is_file()}
             r = drive(url, real, [reply("", [call("c1", "write_file", {"path": p, "content": c}) for p, c in ref.items()]),
                                   reply("fixed parse_amount", [call("c2", "submit", {"note": "done"})])])
             results.append(("d) real 01-ledger-rootcause, canned reference solution -> PASS", r["ok"] is True))
