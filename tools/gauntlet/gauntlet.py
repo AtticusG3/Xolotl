@@ -11,6 +11,13 @@ A task whose task.json carries "answer" (an exact-answer task: no workspace, no 
 whether that regex matches the model's final assistant message. A task with neither hidden tests nor an answer is
 ungradable and fails loudly - it is never scored PASS by accident.
 
+Step budget: every request asks for GAUNTLET_MAX_TOKENS completion tokens (default 36864 = 4096 answer + 32768
+thinking, the same total a local engine gets from TASKEVAL_THINK_BUDGET=32768). On a thinking API the cap covers the
+chain of thought too: the first calibration used 4096 and 47 of its 118 steps were cut off mid-thought (05 and 09
+never wrote a file), so a step that ends on finish_reason "length" is counted per task and shown by `score`.
+reasoning_content is passed back on every assistant turn, as DeepSeek's thinking-mode tool-call protocol requires
+(serve_ds41's encoding renders it the same way).
+
 The workspace may not decide the grade: write_file refuses the names below (see _write_refusal), anything planted
 another way is stripped before the hidden run (_strip_grading_names), and every subprocess that runs model-supplied
 code gets a minimal environment (_child_env) so the harness's credentials are never in reach of a snippet.
@@ -153,6 +160,18 @@ def _grade_answer(pattern, text: str) -> tuple[bool, str]:
     return False, f"answer regex {pattern!r} did NOT match the final assistant message ({len(text)} chars): {text[-400:]!r}"
 
 
+def _partial(ok: bool, out: str) -> float:
+    """Partial credit = the fraction of hidden tests passed, from pytest's last summary line (1.0 / 0.0 for an
+    answer task). A finer signal than pass/10 when comparing two engines on the same frozen set - but the headline
+    stays pass/10, because a task is either done or not."""
+    if ok:
+        return 1.0
+    last = out.strip().splitlines()[-1] if out.strip() else ""
+    n = {k: int(v) for v, k in re.findall(r"(\d+) (passed|failed|error|errors)\b", last)}
+    total = n.get("passed", 0) + n.get("failed", 0) + n.get("error", 0) + n.get("errors", 0)
+    return round(n.get("passed", 0) / total, 4) if total else 0.0
+
+
 def run_task(url: str, task: Path) -> dict:
     meta = json.loads((task / "task.json").read_text())
     d = Path(tempfile.mkdtemp(prefix="gauntlet-run-"))
@@ -161,21 +180,27 @@ def run_task(url: str, task: Path) -> dict:
     hidden_tests = sorted((task / "hidden").rglob("test_hidden_*.py")) if (task / "hidden").is_dir() else []
     answer, final_content = meta.get("answer"), ""
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": meta["prompt"]}]
-    log, toks, secs, test_runs, py_runs, submitted = [], 0, 0.0, 0, 0, False
+    log, toks, secs, test_runs, py_runs, submitted, truncated = [], 0, 0.0, 0, 0, False, 0
+    max_tokens = int(os.environ.get("GAUNTLET_MAX_TOKENS", "36864"))
     integrity = {"refused": [], "removed": []}  # what the workspace tried to do to its own grade
     for _ in range(meta.get("max_steps", 12)):
-        j = T.chat(url, msgs, TOOLS, max_tokens=4096)
+        if os.environ.get("TASKEVAL_THINK_BUDGET"):  # chat() adds the thinking budget on top of the answer's
+            j = T.chat(url, msgs, TOOLS, max_tokens=max(1024, max_tokens - int(os.environ["TASKEVAL_THINK_BUDGET"])))
+        else:
+            j = T.chat(url, msgs, TOOLS, max_tokens=max_tokens)
         toks += j.get("usage", {}).get("completion_tokens", 0)
         secs += j["_secs"]
         m = j["choices"][0]["message"]
+        truncated += j["choices"][0].get("finish_reason") == "length"
+        keep = {"reasoning_content": m["reasoning_content"]} if m.get("reasoning_content") else {}
         final_content = m.get("content") or final_content  # the last text the model produced (incl. the submit turn)
         calls = T.parse_calls(m)
         log.append({"content": m.get("content"), "calls": calls})
         if not calls:
-            msgs.append({"role": "assistant", "content": m.get("content") or ""})
+            msgs.append({"role": "assistant", "content": m.get("content") or "", **keep})
             msgs.append({"role": "user", "content": "Use the tools (call submit when you are done)."})
             continue
-        msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": m["tool_calls"]})
+        msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": m["tool_calls"], **keep})
         for c in calls:
             a, name = c["args"], c["name"]
             if name == "list_files":
@@ -231,7 +256,7 @@ def run_task(url: str, task: Path) -> dict:
         ok, out = _pytest(d, True)
     shutil.rmtree(d, ignore_errors=True)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
-            "tokens": toks, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
+            "truncated": truncated, "partial": _partial(ok, out), "tokens": toks, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
 
 
 def run(url, out, only):
@@ -246,18 +271,21 @@ def run(url, out, only):
                  "integrity": {"refused": [], "removed": []},
                  "hidden_output": f"runner error: {e!r}", "log": []}
         res.append(r)
-        print(f"{r['id']}: {'PASS' if r['ok'] else 'fail'} ({r['steps']} steps, {r['tokens']} tok, {r['secs']:.0f}s)", flush=True)
+        print(f"{r['id']}: {'PASS' if r['ok'] else 'fail'} ({r['steps']} steps, {r['tokens']} tok, {r['secs']:.0f}s, "
+              f"partial {r.get('partial', 0):.2f}, truncated {r.get('truncated', 0)})", flush=True)
     json.dump({"tasks": res, "timings": T.TIMINGS}, open(os.path.join(out, "gauntlet.json"), "w"), indent=1)
 
 
 def score(dirs):
-    print(f"{'run':28s} {'pass':>6s} {'tok':>7s} {'secs':>6s} {'decode tok/s':>13s}  passed")
+    print(f"{'run':28s} {'pass':>6s} {'partial':>7s} {'trunc':>5s} {'tok':>7s} {'secs':>6s} {'decode tok/s':>13s}  passed")
     for d in dirs:
         g = json.load(open(os.path.join(d, "gauntlet.json")))
         ts = [t["timings"] for t in g.get("timings", []) if t.get("timings")]
         dn, dms = sum(t.get("predicted_n", 0) for t in ts), sum(t.get("predicted_ms", 0) for t in ts)
         rs = g["tasks"]
-        print(f"{os.path.basename(d.rstrip('/')):28s} {sum(r['ok'] for r in rs):>3d}/{len(rs):<2d} "
+        part = sum(r.get("partial", _partial(r["ok"], r.get("hidden_output", ""))) for r in rs)
+        print(f"{os.path.basename(d.rstrip('/')):28s} {sum(r['ok'] for r in rs):>3d}/{len(rs):<2d} {part:>7.2f} "
+              f"{sum(r.get('truncated', -1) for r in rs) if all('truncated' in r for r in rs) else '?':>5} "
               f"{sum(r['tokens'] for r in rs):>7d} {sum(r['secs'] for r in rs):>6.0f} "
               f"{1000 * dn / max(dms, 1e-9):>13.1f}  {' '.join(r['id'][:2] for r in rs if r['ok'])}")
 

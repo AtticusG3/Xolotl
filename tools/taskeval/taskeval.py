@@ -24,6 +24,9 @@ def chat(url, messages, tools=None, max_tokens=1024):
     # TASKEVAL_NO_EFFORT=1 drops it - a remote API (the DeepSeek endpoint) rejects it.
     if not os.environ.get("TASKEVAL_NO_EFFORT"):
         body["reasoning_effort"] = "none"
+    # TASKEVAL_EFFORT=low|high|max: an explicit effort (the DeepSeek API's knob; "max" = the model at full potential)
+    if os.environ.get("TASKEVAL_EFFORT"):
+        body["reasoning_effort"] = os.environ["TASKEVAL_EFFORT"]
     # TASKEVAL_THINK_BUDGET=N: the models think (their serve default effort) with a budget of N thinking tokens, and the
     # answer keeps its own max_tokens on top - the way they are served (every Xolotl config: reasoning_budget_tokens 32768)
     tb = int(os.environ.get("TASKEVAL_THINK_BUDGET", "0") or 0)
