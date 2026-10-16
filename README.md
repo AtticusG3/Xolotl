@@ -2,10 +2,14 @@
 
 <h1 align="center">Xolotl</h1>
 
-<p align="center"><b>Run 552-billion-parameter models on one gaming PC.</b><br>
-DeepSeek-V4.1-Flash · GLM-5.3-Flash · Qwen3.8-Flash-Next · Qwen3.8-27B — one engine, one OpenAI / Anthropic-compatible
-server · built on <a href="https://github.com/Niko1221/Strata">Strata</a> · Linux · NVIDIA · MIT</p>
+<p align="center"><b>DeepSeek-V4.1-Flash - all 552 billion parameters - on one gaming PC, at 27 tok/s.</b><br>
+Plus GLM-5.3-Flash, Qwen3.8-Flash-Next and Qwen3.8-27B: one engine, one OpenAI / Anthropic-compatible server.<br>
+Built on <a href="https://github.com/Niko1221/Strata">Strata</a> and heavily extended · Linux · NVIDIA · MIT</p>
 
+> **A Strata fork.** Xolotl keeps [Strata](https://github.com/Niko1221/Strata)'s engine, server and kernels at its
+> core (merged at 0.1.44.1) and adds ~71,000 lines on top: the DeepSeek-V4.1 and V4-Flash engines, the GLM-5.3-Flash
+> engine and the Qwen3.8-27B dense port, each with its own quantisation and expert-tiering work.
+>
 > **Starred this as Strata-DSV4.1?** You are in the right place. Strata-DSV4.1 grew into **Xolotl**: the same
 > DeepSeek-V4.1 engine (faster now), plus GLM-5.3-Flash and the Qwen3.8 models, in one tree. Old links and clones
 > redirect here; nothing DeepSeek-V4.1 was removed.
