@@ -73,3 +73,4 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+out/

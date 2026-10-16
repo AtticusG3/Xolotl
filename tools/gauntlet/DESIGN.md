@@ -38,24 +38,27 @@ Tools the model gets (OpenAI function calling, same in every engine): `list_file
 `write_file(path, content)`, `run_tests()` (visible tests only - output truncated to 4K chars), `submit(note)`.
 Exact-answer tasks get no workspace and are graded on the final message (`answer` = regex the final text must match).
 
-## The 10 tasks (2 written, 8 specified for the next session)
+## The 10 tasks - all written and validated
 
-| # | id | category | the trap / why models fail | status |
+`validate.py` proves for every one: the hidden tests FAIL on the starting workspace, PASS with `reference/`
+applied, and FAIL with `trap/` applied (so the trap is tempting AND caught).
+
+| # | id | category | what it needs / the trap | hidden grading |
 | --- | --- | --- | --- | --- |
-| 01 | ledger-rootcause | agentic debug | the failing visible test is in `report.py`, the cause is in `parse.py` (accounting negatives "(12.50)" and thousands separators); patching `report.py` passes the visible test and fails 4 hidden ones | **written** |
-| 02 | semver-precedence | spec precision | SemVer 2.0 precedence: numeric vs alphanumeric pre-release ids, build metadata ignored, leading zeros invalid, `1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-alpha.beta < 1.0.0-beta.2 < 1.0.0-beta.11` | **written** |
-| 03 | lru-ttl-clock | concurrency + time | an LRU+TTL cache with an injected clock and a thread pool: expiry on read AND write, capacity counts only live entries, `get` refreshes recency but NOT expiry; a lock around `get` only (the obvious fix) deadlocks or races in a hidden stress test | spec |
-| 04 | migration-refactor | refactor | split a 300-line module into a package without changing behaviour; hidden tests import the OLD paths (back-compat shims needed) and pickle/unpickle objects (class `__module__` must survive) | spec |
-| 05 | log-needle | long context (~20K tok) | a 20K-token service log + a config; exactly one request violates a rate-limit rule that is only stated in the config's comments; answer = the request id. Distractor: an obvious ERROR line that is not a violation | spec |
-| 06 | tool-chain-distractors | tool use | 9 tools, 3 near-duplicates (`get_user` vs `get_user_by_email` vs `fetch_user_legacy` returning stale data); the task needs 4 calls in order with an id from call 2 fed to call 4; graded on the final answer AND the call log (no legacy tool) | spec |
-| 07 | csv-dialect-sniff | data wrangling | parse "CSV" exports from 3 systems: `;` separator with decimal commas, quoted newlines, a BOM, a trailing summary row; totals must match to the cent. `float` sums fail a hidden test (Decimal needed) | spec |
-| 08 | regex-engine-mini | algorithmic | implement `match(pattern, s)` for `. * + ? | ( ) ^ $` with leftmost-longest semantics and NO catastrophic backtracking (hidden test: `(a*)*b` on 30 a's must finish < 1 s) | spec |
-| 09 | interval-scheduler | algorithmic + spec | book meetings across time zones incl. a DST gap/overlap day; half-open intervals; the answer must reject a booking that only conflicts in local time during the overlap hour | spec |
-| 10 | fix-the-flake | agentic debug | a test suite that fails 1 run in 3: shared mutable default argument + test order dependence; `run_tests` is deterministic per seed, the model must find the cause, not add retries (hidden test runs the suite 20x with random order) | spec |
+| 01 | ledger-rootcause | agentic debug | the failing visible test is in `report.py`, the cause is in `parse.py` (accounting negatives `(12.50)`, thousands separators, exact cents). Trap: normalising inside `report.py` - visible passes, `parse_amount` stays wrong | 4 hidden checks |
+| 02 | semver-precedence | spec precision | SemVer 2.0 precedence exactly. Trap: comparing pre-release ids as text (`beta.11 < beta.2`); build metadata must be ignored; leading zeros invalid | `1.0.0-alpha < alpha.1 < alpha.beta < beta.2 < beta.11` |
+| 03 | raytracer | graphics / 3D math | implement `render()` to spec: pixel-centre rays, y flip, shadows with an epsilon, reflection depth 3. Trap: `int()` instead of `floor()` for the checker cells (breaks for negative x/z) | pixel-compare vs reference renders, 2 scenes |
+| 04 | log-needle | long context (~20K tok) | one request in a 20K-token gateway log violates a rate limit stated only in `limits.yaml`'s comments. Traps: a closed window (half-open spec), counting the exempt `ops` / `/health`, skipping 429s, the ERROR burst | the exact request id |
+| 05 | regex-engine | algorithms + performance | `fullmatch` for `. * + ? ( ) | [ ] \` and classes. Trap: backtracking (correct but exponential) - `(a*)*b` on 40 a's must finish < 2 s | fuzz vs `re.fullmatch` (2,400 cases) + timing |
+| 06 | ttl-cache | concurrency + time | LRU+TTL with an injected clock and threads: expire lazily on read AND write, capacity counts live entries only, `get` refreshes recency but NOT expiry. Trap: evicting before purging expired entries | expiry/eviction order + thread stress |
+| 07 | csv-money | data wrangling | 3 bank dialects: `,`+`$`, `;`+decimal commas+CRLF+BOM, tab+trailing minus+quoted memos; summary rows excluded. Trap: `float` sums / guessing the dialect | totals to the cent, `expected.json` |
+| 08 | svg-raster | graphics / geometry | rasterize an SVG path subset (M/L/H/V/Z, relative, implicit L after M) with the nonzero or even-odd rule at pixel centres. Trap: always even-odd (breaks a star's centre and a same-direction donut's hole) | character-exact rasters, 10 shapes |
+| 09 | dst-scheduler | time zones / real-world spec | meeting conflicts across DST: a skipped local time must raise, a repeated one is resolved by `fold`, a local day is 23/24/25 h. Trap: `zoneinfo` silently shifts a nonexistent time and a `timedelta(hours=24)` day | gap/overlap, real durations, day lengths |
+| 10 | flaky-suite | agentic debug | the visible suite passes in file order and fails ~1 run in 3 shuffled (a shared default tag list). Trap: fix only that default - `reset()` still leaks the tag index, removal still leaves the tag, and the caller's list / the returned list are still the item's own list | the visible suite in 20 random orders + the full documented contract |
 
-Target difficulty, to calibrate once the 10 exist: run the full-precision DeepSeek API (`deepseek-flash`) and one
-frontier model; **a task that every model passes is too easy - replace it; one that the references pass and every model
-fails 3 runs in a row is fine** (it still separates nothing today, keep at most 2 of those).
+Target difficulty, calibration in progress: the full-precision DeepSeek API (`deepseek-flash` = V4.1-Flash) vs
+the local quantized DSV4.1. **A task every model passes is too easy - replace it; one the references pass and
+every model fails 3 runs in a row is fine** (keep at most 2 of those).
 
 ## Running it
 
@@ -66,8 +69,16 @@ TASKEVAL_THINK_BUDGET=32768 python3 tools/gauntlet/gauntlet.py run ... # (same e
 python3 tools/gauntlet/gauntlet.py score out/ds41 out/glm                   # table: pass/10, tokens, seconds, tok/s
 ```
 
-An API model (e.g. the DeepSeek API, to measure what a quant loses): `TASKEVAL_MODEL=deepseek-flash
-TASKEVAL_KEY=$DEEPSEEK_API_KEY TASKEVAL_URL_IS_BASE=1` - see `verify/e2e/api/taskeval_api.py` for the knobs to port.
+An API model, to measure what a quant loses - the knobs live in `taskeval.py`'s `chat()` now:
+
+```bash
+TASKEVAL_MODEL=deepseek-flash TASKEVAL_KEY="$DEEPSEEK_API_KEY" TASKEVAL_NO_EFFORT=1 \
+  python3 tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api
+```
+
+`TASKEVAL_NO_EFFORT` drops `reasoning_effort: none`, which the API rejects; the local engines keep it. The
+gauntlet's `run_python` tool executes the model's snippet with the workspace as cwd, so every task also needs a
+`max_python_runs` cap in its `task.json`.
 
 ## Reporting
 
