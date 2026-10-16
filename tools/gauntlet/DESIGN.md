@@ -56,9 +56,16 @@ applied, and FAIL with `trap/` applied (so the trap is tempting AND caught).
 | 09 | dst-scheduler | time zones / real-world spec | meeting conflicts across DST: a skipped local time must raise, a repeated one is resolved by `fold`, a local day is 23/24/25 h. Trap: `zoneinfo` silently shifts a nonexistent time and a `timedelta(hours=24)` day | gap/overlap, real durations, day lengths |
 | 10 | flaky-suite | agentic debug | the visible suite passes in file order and fails ~1 run in 3 shuffled (a shared default tag list). Trap: fix only that default - `reset()` still leaks the tag index, removal still leaves the tag, and the caller's list / the returned list are still the item's own list | the visible suite in 20 random orders + the full documented contract |
 
-Target difficulty, calibration in progress: the full-precision DeepSeek API (`deepseek-flash` = V4.1-Flash) vs
-the local quantized DSV4.1. **A task every model passes is too easy - replace it; one the references pass and
-every model fails 3 runs in a row is fine** (keep at most 2 of those).
+**Calibrated 2026-10-16** against the full-precision API (`deepseek-flash` = V4.1-Flash, greedy, no effort
+override): **8/10 in 12 minutes** (114,210 completion tokens, 700 s) - it fails only **03-raytracer** and
+**05-regex-engine**, and it walked 01 in 9 steps, 02 in 7, 09 in 12, 10 in 12. That is too easy to show what a
+quant loses, so the tasks it passed were hardened: 01 (three modules + a reconcile invariant), 02 (SemVer replaced
+by an invented release-ordering spec), 04 (several rules + a key->tenant join + an exemptions file), 06 (`peek`/
+`stats`/invented purge order + a thread stress test), 07 (dialect by header signature + rates normalisation pinned
+by a 1-cent case + a duplicate rule), 08 (C/Q/A curves with a documented flattening rule), 09 (recurring local-time
+meetings + `find_slots`), 10 (queued). Target: the API fails about **7 of 10**, so the gap to a damaged quant is
+measurable. **A task every model passes is too easy - replace it; one the references pass and every model fails 3
+runs in a row is fine** (keep at most 2 of those).
 
 ## Running it
 

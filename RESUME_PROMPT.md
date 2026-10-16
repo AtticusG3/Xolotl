@@ -173,3 +173,40 @@ strata-ds41-quetza / strata-glm-quetza / strata-quetza / strata-dense-quetza   #
   TASKEVAL_KEY -> Authorization header; drop `reasoning_effort: none`; URL https://api.deepseek.com), run
   `python3 tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api`, then the same on local DSV4.1
   (strata-ds41-quetza, port 8150). Goal: the API should fail several tasks; replace any task everything passes.
+
+
+---
+
+## 11. UPDATE — session 4 (2026-10-16 ~17:40), read this INSTEAD of section 10
+
+**Ended:** the Gauntlet is complete (10/10 written + validated) and has been calibrated against the API; 7 hardening
+workers are in flight to raise its difficulty; the 4-model e2e chain is still running on the GPU.
+
+- **Gauntlet is DONE as a benchmark**: all 10 tasks validate (`python3 tools/gauntlet/validate.py` -> 10x OK).
+  Task 10 (flaky-suite) is written (visible suite passes in file order, fails ~1 run in 3 shuffled; trap = fix only
+  the shared default list). The documented **exact-answer task format is now implemented** (`re.search` on the final
+  assistant message) and `selftest.py` drives the real runner for 4 checks - commit `82d1aa64`. A task with neither
+  hidden tests nor an `answer` now fails loudly instead of scoring PASS silently.
+- **Measured API baseline (the number that matters): `deepseek-flash` scores 8/10** - it fails only 03-raytracer and
+  05-regex-engine; 114,210 completion tokens, 700 s for all ten. Too easy => 7 tasks are being hardened right now
+  (01, 02 -> invented release-ordering spec, 04, 06, 07, 08, 09), 10 queued. Target: the API fails ~7/10.
+- **Conductor session 4** (relay name `conductor-1344159.1195555`): workers `ga-harden-{01,02,04,06,07,08,09}`,
+  one slice per task, each gate = `validate.py <that task>` OK + a derivability table (every hidden assertion ->
+  the documented sentence that states it). Reports land in `~/.quetza-data/conductor/reports/ga-harden-NN.md`.
+  **Never run the full `validate.py` while a hardener is editing its task dir** - it will read a half-written tree.
+- **Sequence when they land**: verify each diff myself (not the worker's summary), run
+  `validate.py` over the frozen set + `selftest.py` (its check d re-verifies task 01), commit, then re-run the API
+  (`TASKEVAL_MODEL=deepseek-flash TASKEVAL_KEY="$DEEPSEEK_API_KEY" TASKEVAL_NO_EFFORT=1 python3
+  tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api2`) to confirm the difficulty moved.
+  Then dispatch the flaky-suite hardening (10) and the fairness audit over the FINAL set (the first audit worker was
+  killed before it wrote anything - its subject was being rewritten underneath it).
+- **GPU**: the e2e chain is self-driving (`verify/e2e/final-think.sh`, scores itself, ends with `ALL DONE`). GLM is
+  slow because one HumanEval problem can consume the whole 32K thinking budget: measured 25,446 tok at 28.7 tok/s =
+  **893 s for one problem** (others 35-75 s), 4/21 done in 22 min => GLM ~19:00, then qflash, then q27. Mal may stop
+  the chain; the moment the GPU frees, run the local Gauntlet:
+  `TASKEVAL_THINK_BUDGET=32768 python3 tools/gauntlet/gauntlet.py run http://127.0.0.1:8151 out/gauntlet-ds41`
+  (serve ds41 on 8151 the way `final-think.sh` does). That API-vs-quant contrast on the hardened set is the
+  deliverable; the e2e HumanEval numbers are saturated (21/21) and show little.
+- **Nothing pushed.** Commits this session: `02acb010` (task 10), `ee0610ea` (API knobs), `80290ee2` (DESIGN table),
+  `0ef1e51a` (runner robustness: a bad tool path or one task's exception can no longer kill a run), `82d1aa64`
+  (answer grading + selftest). `README.md` is still dirty on purpose - its table waits on the e2e chain.
