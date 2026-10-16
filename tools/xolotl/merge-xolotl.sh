@@ -14,7 +14,7 @@ BR=$(git branch --show-current)
 [ "$BR" = "xolotl" ] || { echo "refusing: on branch '$BR', expected 'xolotl'" >&2; exit 2; }
 git diff --quiet && git diff --cached --quiet || { echo "refusing: working tree is dirty" >&2; exit 2; }
 
-# the sources: origin/glm and origin/mimo in this clone (origin = ~/AI/Strata-DS4)
+# the sources: origin/glm and origin/mimo in this clone (origin = ~/AI/Xolotl)
 for r in origin/glm origin/mimo; do
     git rev-parse --verify -q "$r" >/dev/null || { echo "missing ref $r - fetch first" >&2; exit 2; }
 done

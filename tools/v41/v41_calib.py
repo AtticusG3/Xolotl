@@ -116,7 +116,7 @@ def _local_texts():
         h = hashlib.sha1(t.encode()).hexdigest()
         if h not in seen and len(t) > 2000:
             seen.add(h); lst.append(t)
-    for pat in ["~/AI/Strata-DS4/src/**/*.cpp", "~/AI/Strata-DS4/src/**/*.cu", "~/AI/Strata-DS4/tools/**/*.py",
+    for pat in ["~/AI/Xolotl/src/**/*.cpp", "~/AI/Xolotl/src/**/*.cu", "~/AI/Xolotl/tools/**/*.py",
                 "~/AI/QuetzaCodetl/src/**/*.ts", "~/AI/Odin/mcp-server/*.js"]:
         for p in sorted(glob.glob(os.path.expanduser(pat), recursive=True)):
             add(code, p)

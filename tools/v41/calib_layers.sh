@@ -12,7 +12,7 @@
 #   N minutes (calibctl start-when-idle: wait for strata-glm to finish).  A CUDA OOM retries the layer up to 4 more times, halving V41_ROWS each time.
 #   Log: $V41_WORK/calib.log (+ one log per layer in $V41_WORK/logs/).   Env: NEED_GIB=38 MAX_GIB=44 IDLE_MIN=0 EXTRA=""
 set -u
-cd /home/mal/AI/Strata-DS4
+cd /home/mal/AI/Xolotl
 W=${V41_WORK:-/media/Crucial1TB/v41-calib}; mkdir -p "$W/logs"
 LOCK=~/.quetza-data/conductor/ds4-gpu.lock
 NEED=${NEED_GIB:-38}; MAX=${MAX_GIB:-44}; IDLE=${IDLE_MIN:-0}

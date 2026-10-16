@@ -24,7 +24,8 @@
 # ============================================================================
 set -eE
 WRAPPER_NAME="strata-glm-quetza"
-GLM_DIR="/home/mal/AI/Strata-GLM"
+# 2026-10-16: repointed to the unified Xolotl tree (pre-Xolotl copy: strata-glm-quetza.bak-prexolotl-20261016)
+GLM_DIR="/home/mal/AI/Xolotl"
 PY="/home/mal/AI/Strata/.venv/bin/python"
 SHIM="$GLM_DIR/tools/glm/serve/serve_glm.py"
 CONFIG_UNC="$GLM_DIR/tools/glm/serve/strata-glm-unc.json"

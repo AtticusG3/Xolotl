@@ -570,7 +570,12 @@ int main(int argc, char ** argv) {
         std::string ferr;
         // the prompt ids[0, n) at positions pos0.. -> last_logits = the last one's
         auto feed = [&](const int * ids, int n, int pos0, const std::function<void(int)> & progress) -> bool {
-            if (NP <= 0) {
+            // xolotl: with the elastic cache grown to its decode size (slot_gib_max > 0), the chunk path's staging
+            // (2 x c_stage of >= 1 GiB) only fits after shrink_cache.  The shrink used to run only for prompts of
+            // more than 256 tokens, so every shorter prompt - a short chat, a short follow-up turn - died at
+            // "ds4_moe: c_stage: out of memory" (exit 134; production too, at 512K).  Now: a few tokens go through
+            // the decode loop (no staging), and every chunked prompt shrinks first.
+            if (NP <= 0 || (slot_gib_max > 0 && n <= 16)) {
                 for (int i = 0; i < n; ++i) {
                     if (!step(ids[i], pos0 + i)) { ferr = dense.last_error(); return false; }
                     if ((i + 1) % 64 == 0 || i + 1 == n) progress(i + 1);
@@ -582,7 +587,7 @@ int main(int argc, char ** argv) {
                 return true;
             }
             // the per-request elastic cache: a long prompt borrows the cache's tail for its chunk scratch
-            const bool elastic_req = slot_gib_max > 0 && n > 256;
+            const bool elastic_req = slot_gib_max > 0;   // every chunked prompt (see feed's note above)
             if (elastic_req) {
                 std::string serr;
                 const int64_t gone = tier.shrink_cache(serr);

@@ -24,10 +24,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 V41 = HERE.parent
-STRATA = Path.home() / "AI" / "Strata"
+# xolotl: the server is THIS tree's serve/ (it used to import ~/AI/Strata's, a separate upstream checkout at 0.1.39)
+STRATA = V41.parent.parent
 sys.path.insert(0, str(STRATA))
 sys.path.insert(0, str(STRATA / "tools"))
-sys.path.insert(0, str(V41.parent))          # Strata-DS4/tools: strata_tokenizer.py with the joyai-llm pre-split
+sys.path.insert(0, str(V41.parent))          # tools/: strata_tokenizer.py with the joyai-llm pre-split
 sys.path.insert(0, str(V41))
 
 import strata_tokenizer as ST  # noqa: E402
@@ -288,14 +289,14 @@ def _note_ds41(self, n, evs, st=None, rate=None):
     return _svc_note(self, n, evs, st, rate)
 
 
-def _run_ds41(self, ids, thinking, tools, max_new, sampling, cancel):
+def _run_ds41(self, ids, thinking, tools, max_new, sampling, cancel, **kw):   # **kw: the server's newer keywords (0.1.44: force=)
     t0 = _time.time()
     _text_state["kind"] = None
     _text_write(f"\n\n===== {_time.strftime('%Y-%m-%d %H:%M:%S')}  request: prompt {len(ids):,} tokens, max {max_new}, "
                 f"thinking {'on' if thinking else 'off'}, tools {len(tools or [])} =====\n")
     end = "(stream closed)"
     try:
-        for item in _svc_run(self, ids, thinking, tools, max_new, sampling, cancel):
+        for item in _svc_run(self, ids, thinking, tools, max_new, sampling, cancel, **kw):
             if item[0] == "done" and isinstance(item[1], dict):
                 d = item[1]
                 end = f"finish {d.get('finish')}, {d.get('completion_tokens')} tokens"

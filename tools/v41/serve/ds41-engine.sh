@@ -34,7 +34,7 @@ export STRATA_DSPARK_CONF="${STRATA_DSPARK_CONF:-0.6}"
 # FIXED 2026-10-15 20:25 (session 13c): the engine now sizes the layer-major batch from the VRAM ACTUALLY free
 # (ds41_generate.cpp's pb_cap; calibrated need ~= 4.3 GiB + 0.95 MiB a column) and retries at half the width, the
 # chunk stage is clamped from free VRAM, and the expert-cache seed skips/retries instead of failing the request -
-# harness-verified with a foreign 4 GiB holder: 3/3 turns complete, 0 errors (logs ~/AI/v41-dev/s13/run15*).
+# harness-verified with a foreign 4 GiB holder: 3/3 turns complete, 0 errors (logs ~/AI/Strata-Backup/v41-dev/s13/run15*).
 # So the opt-in is now SAFE to leave on - a tight card simply gets a narrower batch (that re-reads the file tier once
 # per batch: ~82 GB a sweep, so keep the width as high as the card allows).
 # ADOPTED as the DEFAULT 2026-10-15 21:40 (session 13c): the quiet-box A/B (run17, 3 runs a side, spread < 0.5%):

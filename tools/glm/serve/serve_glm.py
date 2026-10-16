@@ -17,7 +17,8 @@ import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STRATA = Path.home() / "AI" / "Strata"
+# xolotl: the server and tokenizer are THIS tree's (they used to be ~/AI/Strata's, a separate upstream checkout at 0.1.39)
+STRATA = HERE.parent.parent.parent
 sys.path.insert(0, str(STRATA))
 sys.path.insert(0, str(STRATA / "tools"))
 sys.path.insert(0, str(HERE))
@@ -31,10 +32,14 @@ from serve import server as S  # noqa: E402
 _Tok = ST.Tokenizer
 
 
+# xolotl: this tree's tokenizer picks its pre-split from PRE_PATTERNS by name (the old one read a single self._re,
+# which this class overwrote); register llama.cpp's CHATGLM4 split there
+ST.PRE_PATTERNS.setdefault("glm4", [glm_tok.GLM4_PATTERN])
+
+
 class GlmTokenizer(_Tok):
     def __init__(self, tokens, merges, types=None, pre="glm4", special_ids=None):
         super().__init__(tokens, merges, types, pre="glm4", special_ids=special_ids)
-        self._re = glm_tok.regex.compile(glm_tok.GLM4_PATTERN)
 
 
 ST.Tokenizer = GlmTokenizer
@@ -124,7 +129,7 @@ F.OutputParser.__init__ = _op_init_glm
 S.OutputParser = F.OutputParser
 
 if __name__ == "__main__":
-    for i, v in enumerate(sys.argv[:-1]):   # paths are the caller's; the server runs from Strata's directory
+    for i, v in enumerate(sys.argv[:-1]):   # paths are the caller's; the server runs from the repo root
         if v in ("--config", "--tokenizer", "--mcp-config"):
             sys.argv[i + 1] = os.path.abspath(sys.argv[i + 1])
     os.chdir(str(STRATA))
