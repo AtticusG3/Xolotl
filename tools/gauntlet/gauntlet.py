@@ -182,12 +182,26 @@ def run_task(url: str, task: Path) -> dict:
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": meta["prompt"]}]
     log, toks, secs, test_runs, py_runs, submitted, truncated = [], 0, 0.0, 0, 0, False, 0
     max_tokens = int(os.environ.get("GAUNTLET_MAX_TOKENS", "36864"))
+    # GAUNTLET_TASK_TOKENS=N: a hard budget of N completion tokens (thinking included) for the WHOLE task - the same for
+    # every engine, so a run's length is bounded by budget / decode speed. Out of budget = graded as it stands.
+    budget = int(os.environ.get("GAUNTLET_TASK_TOKENS", "0") or 0)
+    tb_env = int(os.environ.get("TASKEVAL_THINK_BUDGET", "0") or 0)
     integrity = {"refused": [], "removed": []}  # what the workspace tried to do to its own grade
     for _ in range(meta.get("max_steps", 12)):
-        if os.environ.get("TASKEVAL_THINK_BUDGET"):  # chat() adds the thinking budget on top of the answer's
-            j = T.chat(url, msgs, TOOLS, max_tokens=max(1024, max_tokens - int(os.environ["TASKEVAL_THINK_BUDGET"])))
+        step_cap = max_tokens
+        if budget:
+            if budget - toks < 1024:
+                break
+            step_cap = min(max_tokens, budget - toks)
+        if tb_env:  # chat() adds the thinking budget on top of the answer's: split this step's cap between them
+            answer = min(4096, step_cap // 2)
+            os.environ["TASKEVAL_THINK_BUDGET"] = str(max(256, min(tb_env, step_cap - answer)))
+            try:
+                j = T.chat(url, msgs, TOOLS, max_tokens=answer)
+            finally:
+                os.environ["TASKEVAL_THINK_BUDGET"] = str(tb_env)
         else:
-            j = T.chat(url, msgs, TOOLS, max_tokens=max_tokens)
+            j = T.chat(url, msgs, TOOLS, max_tokens=step_cap)
         toks += j.get("usage", {}).get("completion_tokens", 0)
         secs += j["_secs"]
         m = j["choices"][0]["message"]
@@ -259,7 +273,7 @@ def run_task(url: str, task: Path) -> dict:
             ok, out = False, f"hidden grading exceeded its {meta.get('grade_timeout', 300)} s budget"
     shutil.rmtree(d, ignore_errors=True)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
-            "truncated": truncated, "partial": _partial(ok, out), "tokens": toks, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
+            "truncated": truncated, "partial": _partial(ok, out), "tokens": toks, "budget": budget, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
 
 
 def run(url, out, only):
