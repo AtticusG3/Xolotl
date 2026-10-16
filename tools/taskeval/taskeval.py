@@ -18,19 +18,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def chat(url, messages, tools=None, max_tokens=1024):
-    body = {"model": "x", "messages": messages, "temperature": 0, "max_tokens": max_tokens, "reasoning_effort": "none",
-            "stream": False}
+    body = {"model": os.environ.get("TASKEVAL_MODEL", "x"), "messages": messages, "temperature": 0,
+            "max_tokens": max_tokens, "stream": False}
+    # local engines: reasoning_effort none = no thinking (a screen, not the deployed setting).
+    # TASKEVAL_NO_EFFORT=1 drops it - a remote API (the DeepSeek endpoint) rejects it.
+    if not os.environ.get("TASKEVAL_NO_EFFORT"):
+        body["reasoning_effort"] = "none"
     # TASKEVAL_THINK_BUDGET=N: the models think (their serve default effort) with a budget of N thinking tokens, and the
     # answer keeps its own max_tokens on top - the way they are served (every Xolotl config: reasoning_budget_tokens 32768)
     tb = int(os.environ.get("TASKEVAL_THINK_BUDGET", "0") or 0)
     if tb > 0:
-        body.pop("reasoning_effort")
+        body.pop("reasoning_effort", None)
         body["reasoning_budget_tokens"] = tb
         body["max_tokens"] = max_tokens + tb
     if tools:
         body["tools"] = tools
-    req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+    # TASKEVAL_KEY: Bearer token for a remote OpenAI-compatible endpoint (the local engines need none)
+    headers = {"Content-Type": "application/json"}
+    if os.environ.get("TASKEVAL_KEY"):
+        headers["Authorization"] = "Bearer " + os.environ["TASKEVAL_KEY"]
+    req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(), headers=headers)
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=3600) as r:
         j = json.load(r)
