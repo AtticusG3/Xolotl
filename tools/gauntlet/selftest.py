@@ -3,7 +3,7 @@
 
 This drives the REAL runner (`gauntlet.run_task`) in a subprocess against a canned OpenAI-shaped endpoint
 (`http.server`, 127.0.0.1:<free port>), so nothing here reimplements the runner - it is the runner's own answer,
-hidden-test and no-grader paths that are under test. Five checks, one line each; exit 0 only if all five hold:
+hidden-test and no-grader paths that are under test. Six checks, one line each; exit 0 only if all six hold:
 
   a) an exact-answer task whose canned final message MATCHES "answer" -> PASS
   b) the same task, canned message that does NOT match                 -> fail
@@ -13,10 +13,14 @@ hidden-test and no-grader paths that are under test. Five checks, one line each;
   e) the same real task, driven by a canned model that tries to grade itself: write_file is refused for
      conftest.py / pytest.ini / decimal.py, a conftest.py planted through run_python is stripped before the
      hidden run, and the hidden run reports the REAL result (13 failures) instead of a green 33 passed
+  f) a) and d) again the way a LOCAL engine is run (TASKEVAL_THINK_BUDGET + GAUNTLET_TASK_TOKENS set): the
+     per-step thinking/answer split must not disturb grading (2026-10-16: it overwrote the answer pattern, and every
+     local task came back as a runner error)
 
   python3 tools/gauntlet/selftest.py
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -76,15 +80,16 @@ def make_task(root, name, meta, files=None):
     return d
 
 
-def drive(url, task, canned):
-    """Run the real runner on `task` in a subprocess and return its result dict."""
+def drive(url, task, canned, env=None):
+    """Run the real runner on `task` in a subprocess and return its result dict (`env`: extra variables)."""
     Canned.seq, Canned.n = canned, 0
     code = ("import sys, json\n"
             "sys.path.insert(0, %r)\n"
             "import gauntlet\n"
             "from pathlib import Path\n"
             "print(json.dumps(gauntlet.run_task(%r, Path(%r))))\n" % (str(HERE), url, str(task)))
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                       env={**os.environ, **(env or {})})
     if r.returncode != 0:
         raise RuntimeError(f"runner subprocess died (rc={r.returncode}):\n{r.stderr[-2500:]}")
     return json.loads([ln for ln in r.stdout.strip().splitlines() if ln.startswith("{")][-1])
@@ -120,9 +125,16 @@ def main() -> int:
             # cannot go stale when the real task grows another module.
             ref = {p.relative_to(refdir).as_posix(): p.read_text()
                    for p in sorted(refdir.rglob("*")) if p.is_file()}
-            r = drive(url, real, [reply("", [call("c1", "write_file", {"path": p, "content": c}) for p, c in ref.items()]),
-                                  reply("fixed parse_amount", [call("c2", "submit", {"note": "done"})])])
+            solve = [reply("", [call("c1", "write_file", {"path": p, "content": c}) for p, c in ref.items()]),
+                     reply("fixed parse_amount", [call("c2", "submit", {"note": "done"})])]
+            r = drive(url, real, solve)
             results.append(("d) real 01-ledger-rootcause, canned reference solution -> PASS", r["ok"] is True))
+
+            local = {"TASKEVAL_THINK_BUDGET": "32768", "GAUNTLET_TASK_TOKENS": "12000"}
+            fa = drive(url, ans, [reply("answer: 42", [call("c1", "submit", {"note": "done"})])], local)
+            fd = drive(url, real, solve, local)
+            results.append((f"f) a) + d) with a local engine's thinking budget -> PASS, PASS "
+                            f"({fa['hidden_output'][:40]!r})", fa["ok"] is True and fd["ok"] is True))
 
             # e) the workspace must not be able to grade itself. Both drives leave the bug UNFIXED, so the
             #    honest hidden result is a fail; anything green here means the plant decided the grade.
