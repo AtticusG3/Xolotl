@@ -133,12 +133,12 @@ def _child_env(home: Path) -> dict[str, str]:
             "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8", "TMPDIR": str(home)}
 
 
-def _pytest(d: Path, hidden: bool) -> tuple[bool, str]:
+def _pytest(d: Path, hidden: bool, timeout: int = 300) -> tuple[bool, str]:
     files = sorted(str(p.relative_to(d)) for p in d.rglob("test_*.py") if p.name.startswith("test_hidden_") == hidden)
     if not files:
         return True, "no tests"
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *files], cwd=d,
-                       capture_output=True, text=True, timeout=300, env=_child_env(d))
+                       capture_output=True, text=True, timeout=timeout, env=_child_env(d))
     return r.returncode == 0, (r.stdout + r.stderr)[-4000:]
 
 
@@ -253,7 +253,10 @@ def run_task(url: str, task: Path) -> dict:
     else:
         integrity["removed"] += _strip_grading_names(d)  # plant a harness file and it is gone before it can grade
         shutil.copytree(task / "hidden", d, dirs_exist_ok=True)
-        ok, out = _pytest(d, True)
+        try:
+            ok, out = _pytest(d, True, meta.get("grade_timeout", 300))
+        except subprocess.TimeoutExpired:
+            ok, out = False, f"hidden grading exceeded its {meta.get('grade_timeout', 300)} s budget"
     shutil.rmtree(d, ignore_errors=True)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
             "truncated": truncated, "partial": _partial(ok, out), "tokens": toks, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}

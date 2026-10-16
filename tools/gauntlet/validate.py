@@ -17,13 +17,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
-def pytest_ok(d: Path, which: str) -> bool:
+def pytest_ok(d: Path, which: str, timeout: int = 300) -> bool:
     files = sorted(str(p.relative_to(d)) for p in d.rglob("test_*.py")
                    if (which == "hidden") == p.name.startswith("test_hidden_"))
     if not files:
         return True
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *files], cwd=d,
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=timeout)
     return r.returncode == 0
 
 
@@ -70,16 +70,17 @@ def validate(task: Path) -> bool:
         return validate_answer(task, meta["answer"])
     checks = []
     d = stage(task, None)
-    checks.append(("start: hidden FAIL", not pytest_ok(d, "hidden")))
+    checks.append(("start: hidden FAIL", not pytest_ok(d, "hidden", meta.get("grade_timeout", 300))))
     shutil.rmtree(d)
     d = stage(task, "reference")
     checks.append(("reference: visible PASS", pytest_ok(d, "visible")))
-    checks.append(("reference: hidden PASS", pytest_ok(d, "hidden")))
+    gt = meta.get("grade_timeout", 300)
+    checks.append(("reference: hidden PASS", pytest_ok(d, "hidden", gt)))
     shutil.rmtree(d)
     if (task / "trap").is_dir():
         d = stage(task, "trap")
         checks.append(("trap: visible PASS (tempting)", pytest_ok(d, "visible")))
-        checks.append(("trap: hidden FAIL (caught)", not pytest_ok(d, "hidden")))
+        checks.append(("trap: hidden FAIL (caught)", not pytest_ok(d, "hidden", meta.get("grade_timeout", 300))))
         shutil.rmtree(d)
     ok = all(c[1] for c in checks)
     print(f"{'OK  ' if ok else 'BAD '} {task.name}: " + ", ".join(f"{n} {'yes' if v else 'NO'}" for n, v in checks))
