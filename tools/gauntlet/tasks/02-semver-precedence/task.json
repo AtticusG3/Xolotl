@@ -1,0 +1,4 @@
+{"id": "02-semver-precedence", "category": "spec precision",
+ "prompt": "Implement parse, compare and sort_versions in semver.py exactly as its docstring specifies (Semantic Versioning 2.0.0). The visible test only covers the basics; a much stricter hidden suite grades the result. Use the tools; when you are done, call submit.",
+ "max_steps": 10, "max_test_runs": 6,
+ "trap": "pre-release identifiers compared as strings (beta.11 < beta.2); also: build metadata in the comparison, leading-zero rules, numeric < alphanumeric"}
