@@ -209,7 +209,16 @@ def run_task(url: str, task: Path) -> dict:
         keep = {"reasoning_content": m["reasoning_content"]} if m.get("reasoning_content") else {}
         final_content = m.get("content") or final_content  # the last text the model produced (incl. the submit turn)
         calls = T.parse_calls(m)
-        log.append({"content": m.get("content"), "calls": calls})
+        tm, us = j.get("timings") or {}, j.get("usage") or {}
+        log.append({"content": m.get("content"), "calls": calls, "reasoning": m.get("reasoning_content"),
+                    "finish": j["choices"][0].get("finish_reason"), "secs": round(j["_secs"], 2), "usage": us,
+                    "timings": tm})
+        if os.environ.get("GAUNTLET_QUIET") is None:  # one live line per step: prefill (new/reused), decode, thinking
+            print(f"  [{meta['id'][:2]} step {len(log):2d}] {j['_secs']:6.1f}s  prompt {us.get('prompt_tokens', 0):6d} "
+                  f"(reused {tm.get('cache_n', (us.get('prompt_tokens_details') or {}).get('cached_tokens', 0))}, "
+                  f"{tm.get('prompt_per_second', 0):.0f} tok/s)  out {us.get('completion_tokens', 0):5d} "
+                  f"(think {len(m.get('reasoning_content') or '')} ch, {tm.get('predicted_per_second', 0):.1f} tok/s)  "
+                  f"{','.join(c['name'] for c in calls) or '-'}  [{toks}/{budget or '-'} tok]", flush=True)
         if not calls:
             msgs.append({"role": "assistant", "content": m.get("content") or "", **keep})
             msgs.append({"role": "user", "content": "Use the tools (call submit when you are done)."})
