@@ -1,4 +1,53 @@
-# Xolotl — HANDOFF (2026-10-17, session 5 — CURRENT; session 4 and earlier below are history)
+# Xolotl — HANDOFF (2026-10-17, session 6 — CURRENT; sessions 5 and earlier below are history)
+
+## S6 Session 6 (2026-10-17 09:40-) - running log, newest last
+- **GPU ownership**: no peer on the GPU at start (bfd97150 idle since 08:06; the 09:20 ds41 start was the outreach
+  session's throughput probe for the Phison call, during Teams = 10 GiB free VRAM -> batch 5192, not a quiet number).
+  Broadcast on relay that this session owns the GPU. **Lane script now uses port 8161** (`GAUNTLET_PORT`), and
+  `GLM_CFG=` picks the GLM config (`verify/e2e/gauntlet-local-all.sh`, backup `.bak-s6`).
+- **GLM chat-text cross-check DONE - it overturns session 5's provisional B1.** `verify/s5/glmq/sweep-chat6.log` +
+  `sweep-q6.log` (per-token path, `GLM_BIAS_PROMPT=1`, 2,000-token `eval_chat` / 2,586-token `agentic03`):
+
+  | config | chat ppl | agentic ppl | decode tok/s | VRAM hit |
+  | --- | ---: | ---: | ---: | ---: |
+  | exact (per-token / chunked) | 5.53 / 5.56 | 8.00 | ~11 | 28 % |
+  | soft prune 0.05 | 5.43 | 7.89 | 11 | 29 % |
+  | prune + bias 0.1 / file 0.1 | 6.56 | 7.51 | 18-20 | 69 % |
+  | prune + bias 0.25 / file 0.15 | 7.22 | 5.49 | 26-28 | 86 % |
+  | **prune + bias 0.25 (no file bias)** | **6.89** | **5.44** | **25-28** | 86 % |
+  | prune + bias 0.5 / file 0.3 (B1) | 9.05 | 4.32 | 35-36 | 98 % |
+  | prune + bias 1.0 / file 0.6 | 57.5 | 7.20 | 40 | 100 % |
+
+  The agentic text is the Gauntlet 03 task, and the census (`~/.quetza-data/strata-glm/maya-s-v2.census`, ~240K tokens
+  of decode history, updated by EVERY glm_generate run incl. these sweeps, ~1 % per run) was built partly on Gauntlet
+  traffic, so "bias lowers agentic ppl" is probably the bias replaying routes already used for that text. Chat text
+  is the honest measure. File bias adds cost without speed. **Candidate = soft prune + `--route-bias 0.25`** (chat
+  +25 %, cf. ds41's accepted +21 % code ppl), `tools/glm/serve/strata-glm-maya-abl-512k-bias.json`; downstream test =
+  `verify/s6/glm-full.sh` (replay 13/14, smoke, HumanEval e2e, Gauntlet v2, throughput on one server).
+  Census snapshot at 09:48: `verify/s6/maya-s-v2.census.20261017-0948`.
+- **ds41 throughput, quiet box (344 MiB VRAM used), `verify/e2e/s6-throughput-ds41{,-noarena}/`:**
+
+  | ds41 | arena ON (s5 default) | arena OFF |
+  | --- | ---: | ---: |
+  | prefill 6.1K fresh | 178.5 | 179.4 |
+  | prefill 16.5K fresh | 226.2 | 266.6 |
+  | decode 256 after 6K / 16.5K | 18.4 / 14.5 | 22.9 / 20.6 |
+  | +160-token turn on 16.8K | 12.65 s | 8.95 s |
+  | 37-token decode seed after 16.5K | 15.3 s | 3.2 s |
+
+  Prompt batch: 9,069 on the first prompt (13.7 GiB free), ~5,900 after the DSpark sidecar (2.9 GB) loads - never
+  12,288, so README's "~350-390 tok/s on 20K" is wrong for the served setup (to correct).
+  **Cause (arena ON slower back-to-back):** request end retires up to 2,048 arena slots for the reader, and the next
+  prompt pauses the reader at once -> those slots stay EMPTY through the whole next prompt (neither victim nor
+  candidate resident): 16.5K prompt file-tier reads 24,926 vs 17,527. turnbench (s5's evidence) had 20 s gaps.
+  **Fix (uncommitted until the A/B):** `rebal_cancel` in `tools/v41/engine/ds41_moe.cpp` - at prompt start, queued
+  jobs the reader has not started give the slot back to their victim (bytes untouched), the one in-flight read is
+  waited for; `STRATA_ARENA_REBAL_DECODE=0` = reads only at request end; `DS41_CHECK_ARENA=1` also byte-checks restored
+  victims. A/B = `verify/s6/ds41-arena-ab.sh` (NEW NEWND OFF OLD CHK), pre-fix binary `verify/s6/build-pre-cancel/`.
+- `verify/s6/badcalls.py <run dirs>` counts malformed tool calls in Gauntlet runs (reproduces s5: GLM served 3/27 bad,
+  exact 0/39).
+
+# Xolotl — HANDOFF (2026-10-17, session 5 — history)
 **RESUME = the "START HERE" block at the top of `RESUME_PROMPT.md`** (written at the end of session 5, ~08:20). It
 supersedes S5.2/S5.3 below where they disagree (e.g. the adaptive arena is now ON by default, GitHub is pushed and the
 repo renamed to Indras-Mirror/Xolotl).
