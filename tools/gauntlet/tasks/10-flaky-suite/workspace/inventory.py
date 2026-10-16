@@ -1,4 +1,5 @@
-"""inventory.py - module A: the items and the tags on them; pricing.py quotes them - one system.
+"""inventory.py - module A: the items and the tags on them; pricing.py quotes them and orders.py
+holds them - one system.
 
 Documented behaviour, for every caller:
 
@@ -7,17 +8,25 @@ Documented behaviour, for every caller:
                          qty must be > 0 else ValueError; adds qty units of name, creating the
                          item if it is new.  Its tags are the union of the tags it already had
                          and `tags`, once each, in first-seen order.  Returns its tag list.
-  remove_item(name, qty) qty must not exceed the stock, else ValueError.  At zero the item is
-                         gone - and so is its tag.
+  remove_item(name, qty) qty must not exceed the stock, else InsufficientStock; an unknown name
+                         is a KeyError.  At zero the item is gone - and so is its tag.
   tagged(tag)            the names of the items currently IN STOCK carrying tag, sorted.
+  stock(name)            the units of name in stock - 0 when the name is unknown.
   total()                the stock of every item, summed.
 
-Two rules about identity, not values:
+Callers catch these by TYPE, never by "something raised": a qty that is not positive is a
+ValueError, a name that is not in stock a KeyError, and asking for more units than there are an
+InsufficientStock (a ValueError) - orders.reserve relies on exactly that.
 
-  * the `tags` argument is COPIED into the item - the caller may keep the list and mutate it
-    later and the item must not change - and two calls that pass no tags must not share a list.
-  * the list add_item returns is a COPY too: appending to it must not change the item.
+Identity, not values: the `tags` argument is COPIED into the item (the caller may keep the list
+and mutate it later), two calls that pass no tags must not share a list, and the list add_item
+returns is a copy too.
 """
+
+
+class InsufficientStock(ValueError):
+    """More units were asked for than the stock holds (a ValueError)."""
+
 
 _items = {}
 _by_tag = {}
@@ -44,7 +53,7 @@ def add_item(name, qty, tags=[]):
 def remove_item(name, qty):
     item = _items[name]
     if qty > item["qty"]:
-        raise ValueError("not enough stock")
+        raise InsufficientStock("not enough stock")
     item["qty"] -= qty
     if item["qty"] == 0:
         del _items[name]
@@ -53,6 +62,12 @@ def remove_item(name, qty):
 def tagged(tag):
     """Names of the items in stock that carry tag, sorted."""
     return sorted(_by_tag.get(tag, set()))
+
+
+def stock(name):
+    """The units of name in stock - 0 when the name is unknown."""
+    item = _items.get(name)
+    return item["qty"] if item else 0
 
 
 def total():

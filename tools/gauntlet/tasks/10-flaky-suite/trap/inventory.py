@@ -1,10 +1,18 @@
-"""THE TRAP: fix the two classic faults - the shared default tag list and the tag index that
-reset() and remove_item() never maintain - so the visible suite goes green in every order, and
-leave pricing.py exactly as it shipped: its memo still outlives a price change and still
-outlives an item going out of clearance.  Hidden grading catches exactly that.
+"""THE TRAP: fix module A - the shared default tag list, the tag index that reset() and
+remove_item() never maintain, the missing accessor - so the visible suite goes green in every
+order, and stop there.  pricing.py still ships its memo (a quote that outlives a price change and
+an item going out of clearance) and price_table still orders by text, while orders.py still
+recomputes a held total from pricing (so a hold does not survive the world moving on), measures a
+request against the wrong stock and refuses with the wrong exception type.  Hidden grading catches
+exactly that.
 
 (This file exists only for validate.py.)
 """
+
+
+class InsufficientStock(ValueError):
+    """More units were asked for than the stock holds (a ValueError)."""
+
 
 _items = {}
 _by_tag = {}
@@ -32,7 +40,7 @@ def add_item(name, qty, tags=()):
 def remove_item(name, qty):
     item = _items[name]
     if qty > item["qty"]:
-        raise ValueError("not enough stock")
+        raise InsufficientStock("not enough stock")
     item["qty"] -= qty
     if item["qty"] == 0:
         del _items[name]
@@ -43,6 +51,12 @@ def remove_item(name, qty):
 def tagged(tag):
     """Names of the items in stock that carry tag, sorted."""
     return sorted(_by_tag.get(tag, set()))
+
+
+def stock(name):
+    """The units of name in stock - 0 when the name is unknown."""
+    item = _items.get(name)
+    return item["qty"] if item else 0
 
 
 def total():

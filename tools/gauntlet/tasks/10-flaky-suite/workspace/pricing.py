@@ -1,4 +1,5 @@
-"""pricing.py - module B: the unit prices and the quotes (it reads inventory - one system).
+"""pricing.py - module B: the unit prices and the quotes; it reads inventory and orders.py holds
+its unit prices - one system.
 
 Documented behaviour, for every caller:
 
@@ -8,7 +9,9 @@ Documented behaviour, for every caller:
   price_of(name)         the recorded unit price as a Decimal; ValueError when none.
   quote(name, qty)       the cost of qty units as an exact Decimal: qty must be > 0 and the
                          name priced, else ValueError.  While the item is in stock and tagged
-                         "clearance" the unit price is halved.
+                         "clearance" the unit price is halved, so quote(name, 1) is the unit
+                         price IN FORCE - what orders.reserve prices a hold with.  price_of is
+                         the recorded price, clearance or not.
   price_table()          every recorded price as "<name> <price>" text, one line each, smallest
                          price first; equal prices keep the order they were recorded.
 

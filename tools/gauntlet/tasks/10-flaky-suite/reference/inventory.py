@@ -1,5 +1,10 @@
-"""A tiny inventory service - module A (reference: copied tag lists, a tag index maintained on
-every removal and on reset)."""
+"""inventory.py - module A (reference: copied tag lists, a tag index maintained on every removal
+and on reset, and the documented exception types)."""
+
+
+class InsufficientStock(ValueError):
+    """More units were asked for than the stock holds (a ValueError)."""
+
 
 _items = {}
 _by_tag = {}
@@ -27,7 +32,7 @@ def add_item(name, qty, tags=()):
 def remove_item(name, qty):
     item = _items[name]
     if qty > item["qty"]:
-        raise ValueError("not enough stock")
+        raise InsufficientStock("not enough stock")
     item["qty"] -= qty
     if item["qty"] == 0:
         del _items[name]
@@ -38,6 +43,12 @@ def remove_item(name, qty):
 def tagged(tag):
     """Names of the items in stock that carry tag, sorted."""
     return sorted(_by_tag.get(tag, set()))
+
+
+def stock(name):
+    """The units of name in stock - 0 when the name is unknown."""
+    item = _items.get(name)
+    return item["qty"] if item else 0
 
 
 def total():

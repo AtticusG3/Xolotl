@@ -1,11 +1,12 @@
-"""The shop's suite over inventory.py and pricing.py; CI runs it in a random order.  A real
-signal, but not the whole contract - the docstrings are.
+"""The shop's suite over inventory.py, pricing.py and orders.py; CI runs it in a random order.  A
+real signal, but not the whole contract - the docstrings are.
 """
 from decimal import Decimal
 
 import pytest
 
 import inventory as inv
+import orders as od
 import pricing as pr
 
 
@@ -55,3 +56,26 @@ def test_clearance_halves_the_unit_price():
     inv.add_item("screw", 2, ["clearance"])
     pr.set_price("screw", "3.00")
     assert pr.quote("screw", 1) == Decimal("1.50")
+
+
+def test_reserve_holds_the_stock_until_it_is_released():
+    inv.reset()
+    pr.reset()
+    od.reset()
+    inv.add_item("crate", 10)
+    pr.set_price("crate", "5.00")
+    assert od.reserve("crate", 4, "ord-a")["qty"] == 4
+    assert (od.held("crate"), od.total("crate")) == (4, Decimal("20.00"))
+    assert od.release("ord-a") == Decimal("20.00")
+    assert (od.held("crate"), od.total("crate")) == (0, Decimal("0"))
+
+
+def test_a_repeated_key_holds_the_stock_once():
+    inv.reset()
+    pr.reset()
+    od.reset()
+    inv.add_item("cane", 3)
+    pr.set_price("cane", "1.00")
+    od.reserve("cane", 2, "ord-b")
+    od.reserve("cane", 2, "ord-b")
+    assert od.held("cane") == 2
