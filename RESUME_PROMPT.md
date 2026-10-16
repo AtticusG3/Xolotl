@@ -187,7 +187,7 @@ workers are in flight to raise its difficulty; the 4-model e2e chain is still ru
   the shared default list). The documented **exact-answer task format is now implemented** (`re.search` on the final
   assistant message) and `selftest.py` drives the real runner for 4 checks - commit `82d1aa64`. A task with neither
   hidden tests nor an `answer` now fails loudly instead of scoring PASS silently.
-- **Measured API baseline (the number that matters): `deepseek-flash` scores 8/10** - it fails only 03-raytracer and
+- **Measured API baseline (SUPERSEDED - see section 13 for the post-hardening number, 3/10): `deepseek-flash` scored 8/10** - it failed only 03-raytracer and
   05-regex-engine; 114,210 completion tokens, 700 s for all ten. Too easy => 7 tasks are being hardened right now
   (01, 02 -> invented release-ordering spec, 04, 06, 07, 08, 09), 10 queued. Target: the API fails ~7/10.
 - **Conductor session 4** (relay name `conductor-1344159.1195555`): workers `ga-harden-{01,02,04,06,07,08,09}`,
