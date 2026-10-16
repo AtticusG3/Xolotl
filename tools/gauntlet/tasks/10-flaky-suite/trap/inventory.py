@@ -1,6 +1,7 @@
-"""THE TRAP: makes the visible suite green in every order (per-call default list, reset clears the tag
-index, removal maintains it) but still hands out the caller's list and returns the internal one, so
-mutating either still changes the item - the hidden tests catch exactly that.
+"""THE TRAP: fix the two classic faults - the shared default tag list and the tag index that
+reset() and remove_item() never maintain - so the visible suite goes green in every order, and
+leave pricing.py exactly as it shipped: its memo still outlives a price change and still
+outlives an item going out of clearance.  Hidden grading catches exactly that.
 
 (This file exists only for validate.py.)
 """
@@ -10,22 +11,22 @@ _by_tag = {}
 
 
 def reset():
+    """Forget every item, and every tag with it."""
     _items.clear()
     _by_tag.clear()
 
 
-def add_item(name, qty, tags=None):
+def add_item(name, qty, tags=()):
+    """Add qty of name (qty > 0); tags is an optional list of strings.  Returns the item's tags."""
     if qty <= 0:
         raise ValueError("qty must be positive")
-    if tags is None:
-        tags = []
-    item = _items.setdefault(name, {"qty": 0, "tags": tags})   # the caller's list IS the item's list
+    item = _items.setdefault(name, {"qty": 0, "tags": []})
     item["qty"] += qty
     for t in tags:
         if t not in item["tags"]:
             item["tags"].append(t)
         _by_tag.setdefault(t, set()).add(name)
-    return item["tags"]                                        # and the internal list is returned
+    return list(item["tags"])
 
 
 def remove_item(name, qty):
@@ -40,6 +41,7 @@ def remove_item(name, qty):
 
 
 def tagged(tag):
+    """Names of the items in stock that carry tag, sorted."""
     return sorted(_by_tag.get(tag, set()))
 
 

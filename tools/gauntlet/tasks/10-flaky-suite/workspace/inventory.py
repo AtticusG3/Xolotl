@@ -1,21 +1,22 @@
-"""A tiny inventory service (the module our flaky CI suite tests).
+"""inventory.py - module A: the items and the tags on them; pricing.py quotes them - one system.
 
-Documented behaviour - every function, for every caller:
+Documented behaviour, for every caller:
 
-  reset()                forget every item AND every tag (tests call this first)
-  add_item(name, qty, tags=[])   qty must be > 0, else ValueError.  Adds qty units of name (creating the
-                         item if new).  The item's tags are the union of the tags it already had and
-                         `tags`, each tag listed once.  Returns the item's tag list.
-  remove_item(name, qty) qty must not exceed the stock, else ValueError.  When the stock reaches 0 the
-                         item is gone - and so is its tag.
-  tagged(tag)            names of the items currently IN STOCK that carry tag, sorted.
-  total()                the sum of the stock of every item.
+  reset()                forget every item AND every tag - every index derived from them goes.
+  add_item(name, qty, tags=[])
+                         qty must be > 0 else ValueError; adds qty units of name, creating the
+                         item if it is new.  Its tags are the union of the tags it already had
+                         and `tags`, once each, in first-seen order.  Returns its tag list.
+  remove_item(name, qty) qty must not exceed the stock, else ValueError.  At zero the item is
+                         gone - and so is its tag.
+  tagged(tag)            the names of the items currently IN STOCK carrying tag, sorted.
+  total()                the stock of every item, summed.
 
-Two rules that are easy to get wrong, because they are about identity, not values:
+Two rules about identity, not values:
 
-  * the `tags` argument is COPIED into the item: the caller may keep the list and mutate it afterwards
-    and the item must not change.  Two calls that pass no tags at all must not end up sharing one list.
-  * the list add_item returns is a COPY too: appending to it must not change the item or its tags.
+  * the `tags` argument is COPIED into the item - the caller may keep the list and mutate it
+    later and the item must not change - and two calls that pass no tags must not share a list.
+  * the list add_item returns is a COPY too: appending to it must not change the item.
 """
 
 _items = {}
@@ -23,12 +24,12 @@ _by_tag = {}
 
 
 def reset():
-    """Forget every item (tests call this first)."""
+    """Forget every item, and every tag with it."""
     _items.clear()
 
 
 def add_item(name, qty, tags=[]):
-    """Add qty of name (qty > 0); tags is an optional list of strings.  Returns the item's tag list."""
+    """Add qty of name (qty > 0); tags is an optional list of strings.  Returns the item's tags."""
     if qty <= 0:
         raise ValueError("qty must be positive")
     item = _items.setdefault(name, {"qty": 0, "tags": tags})

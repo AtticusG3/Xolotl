@@ -1,17 +1,18 @@
-"""A tiny inventory service (reference: per-call tag lists, no aliasing, complete index maintenance)."""
+"""A tiny inventory service - module A (reference: copied tag lists, a tag index maintained on
+every removal and on reset)."""
 
 _items = {}
 _by_tag = {}
 
 
 def reset():
-    """Forget every item (tests call this first)."""
+    """Forget every item, and every tag with it."""
     _items.clear()
     _by_tag.clear()
 
 
 def add_item(name, qty, tags=()):
-    """Add qty of name (qty > 0); tags is an optional list of strings.  Returns the item's tag list."""
+    """Add qty of name (qty > 0); tags is an optional list of strings.  Returns the item's tags."""
     if qty <= 0:
         raise ValueError("qty must be positive")
     item = _items.setdefault(name, {"qty": 0, "tags": []})
