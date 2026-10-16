@@ -79,6 +79,16 @@ A <a href="https://github.com/Niko1221/Strata">Strata</a> engine · Linux · NVI
 3. Hugging Face: the model repo name can stay (it describes the weights), only its card gets the brand.
 4. Keep "a Strata engine" in the subtitle (recommended) or drop it.
 
+## FINAL (2026-10-17, Mal's picks) - the sources are in `/Assets`
+
+| source (`Assets/`) | role | composed into (`docs/brand/assets/`) |
+| --- | --- | --- |
+| `circle.1.png` | **the logo** - the coiled winged serpent in a ring | `logo-circle-400.png` (README), `avatar-512/256.png` (GitHub / Hugging Face), `favicon.ico` + `favicon-64.png` |
+| `wordmark-banner.gemini-3-pro-image.2.png` | **the banner** | `readme-header-1200.png`, `github-social-preview-1280x640.png`, `og-card-1200x630.png` |
+| `hero.gemini-3-pro-image.2.png` | hero / post image | `readme-hero-1600.png` |
+
+Composed locally with PIL (no image-model credits). `logo-min.*` (below) is superseded by the circle logo.
+
 ## Chosen direction + final assets (2026-10-15, Mal's picks)
 
 Direction: the **dark winged feathered serpent** (Quetza's dark twin) - ink linework, black feathers, one violet eye,
