@@ -53,7 +53,10 @@ Sources read 2026-10-16 (summarised; every claim below is from one of them):
   keeps at most ~2 of those.
 - **No wall-clock assertions** and no unseeded randomness — both are flakiness sources, not difficulty.
 
-## Where the set stands (measured 2026-10-16, `deepseek-flash`, greedy)
+## Where the set stands (final measurement, 2026-10-16)
 
-FAIL: 01, 03, 04, 05, 06, 08 · PASS: 09 (12 steps), 10 (9 steps) · unmeasured after their last change: 02, 07.
-A task the API passes is the one to spend hardening effort on; a task it fails is already doing its job.
+`deepseek-flash`, greedy, no effort override, on the frozen hardened set: **3/10 pass** (01, 02, 06 - each at the
+12-step ceiling and never submitting), **7/10 fail** (03, 04, 05, 07, 08, 09, 10) for 246K completion tokens and
+1,453 s. Before hardening the same model scored 8/10. The narrowness of the misses is the point: 03 fails one scene,
+07/10 fail 2 cases, 04 fails 2 assertions - so there is room above and below the frontier, which is what makes the
+gap to a quantized engine measurable.

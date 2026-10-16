@@ -63,14 +63,20 @@ applied, and FAIL with `trap/` applied (so the trap is tempting AND caught).
 | 09 | dst-scheduler | time zones / real-world spec | DST-correct scheduling: a skipped local time must raise, a repeated one is resolved by `fold`, a local day is 23/24/25 h, plus an exact `agenda()` serialization (each line carries the offset in force at that instant and real minutes across a change), a shipped `blackouts.txt` whose precedence over the busy list and the minimum-notice rule is documented, and weekly local-time recurrences. Trap: `zoneinfo` silently shifting a nonexistent time, a 24 h day | 37 hidden cases; grading asserts the tzdb resolves and records its version |
 | 10 | flaky-suite | agentic debug | three documented modules (`inventory`, `pricing`, `orders`) with one contract; the visible suite is green in EVERY order (no free symptom - 60/60 shuffled orders on the starting workspace), while the buried faults include a hold that is priced once at reserve time and must not follow the world. Trap: fix the in-module faults (aliased tag lists, stale index) and stop - the cross-module ones still fail | the visible suite in 20 shuffled orders + ~35 contract assertions (60 cases) |
 
-**Calibration (2026-10-16, `deepseek-flash` = V4.1-Flash, greedy, no effort override).** The first pass scored
-**8/10** - it failed only 03-raytracer and 05-regex-engine - which is too easy to show what a quant loses, so every
-task it passed was hardened (later 09 and 10 a second time). Per task, measured after its hardening:
-**FAIL 01, 03, 04, 05, 06, 08; PASS 09 (12 steps) and 10 (9 steps)** - and 09/10 have been hardened again since that
-measurement, while **02 and 07 were last measured before their final changes**. The set therefore needs one clean
-full-set re-measure before any number is quoted; the target is the API failing about 7 of 10 with the local
-quants below it, i.e. a spread rather than a wall. **A task every model passes is too easy - replace it; one the
-references pass and every model fails 3 runs in a row is fine** (keep at most 2 of those).
+**Calibration (2026-10-16, `deepseek-flash` = V4.1-Flash, greedy, no effort override).** Before hardening the API
+scored **8/10** (it failed only 03 and 05) - too easy to show what a quant loses. After the hardening waves the same
+model, same settings, scores **3/10**:
+
+| PASS | FAIL | |
+| --- | --- | --- |
+| **01** ledger, **02** release-order, **06** ttl-cache | **03** raytracer, **04** log-needle, **05** regex-engine, **07** csv-money, **08** svg-raster, **09** dst-scheduler, **10** flaky-suite | 246,337 completion tokens, 1,453 s |
+
+The three passes are all **at the ceiling** (12 steps, never submitted) and the misses are narrow rather than total -
+03 fails one scene, 07 and 10 fail 2 cases each, 04 fails 2 assertions, while 05 (122 failures) and 09 (36) collapse -
+so the frontier sits right on the task set: a weaker engine (or a quantized one) drops below it, a stronger one
+could clear it. **A task every model passes is too easy - replace it; one the references pass and every model fails
+3 runs in a row is fine** (keep at most 2 of those). Re-measure after any change to a task: 01 passed here at 12
+steps where an earlier run failed it at the same 12 steps, i.e. the boundary tasks are borderline by design.
 
 ## Running it
 
