@@ -447,8 +447,15 @@ bool ds4_moe_geom_from_gguf(const std::string& gguf, Ds4MoeGeom& g, std::string&
         }
         // block_count counts the NextN/MTP draft block(s) when the file carries them (Maya-S-v2: 46 = 45 + blk.45);
         // they are not decoder layers and their experts must not enter the tier
-        if (int64_t nn = 0; meta_i64(f, arch + ".nextn_predict_layers", nn) && nn > 0 && nn < g.n_layers)
-            g.n_layers -= nn;
+        // ... but ONLY when the file carries them (xolotl, bug 13): DeepSeek-V4-Flash-0731 declares
+        // nextn_predict_layers = 1 with its MTP in a separate sidecar - block_count 43 = blocks 0..42, all decoder
+        // layers - and the unconditional subtraction dropped layer 42 (the profile then read "per token 252" for its
+        // 43 x 6 = 258 records).  The NextN block is the one that holds blk.<first>.nextn.eh_proj.
+        if (int64_t nn = 0; meta_i64(f, arch + ".nextn_predict_layers", nn) && nn > 0 && nn < g.n_layers) {
+            char nx[64];
+            std::snprintf(nx, sizeof nx, "blk.%lld.nextn.eh_proj.weight", (long long) (g.n_layers - nn));
+            if (model.find(nx)) g.n_layers -= nn;
+        }
         // every layer's three expert types; a layer with none of the tensors has no routed experts (MiMo's layer 0)
         const char* roles[3] = {"gate", "up", "down"};
         std::vector<int> ty[3];
