@@ -41,7 +41,9 @@ rejections (s4: 3,178 of 3,178): now 2,561 swaps, all published, 0 bad under `DS
 agent schedule (4K base, 8 turns, `--gap 20`): file-tier experts per small turn -21..-30%, small-turn wall time
 8.48 -> 7.60 s (-10%); the simulated ceiling was -35..-45%. Logits are not bit-identical when on (MMVQ vs MMQ by
 residency), so the gate is byte checks + an output-quality run: `verify/e2e/final-think/r_ds41_rebal` (HumanEval/tool/
-agentic with it on, session 5) - compare with `r_ds41` before making it default.
+agentic with it on, session 5): **21/21, 10/10, 3/3 - same as `r_ds41`**, decode 26.8 vs 26.4 tok/s, 16,170 swaps
+published over the run, 0 bad. (`r_ds41` ran on the older `build-xolotl` binary, so that is a quality match, not a
+clean speed A/B.) Making it default is Mal's call.
 Next levers: more swaps per gap (`end_batch`, `per_tick`), and the prompt's own reads overlapping the dense phase
 (s4 item 1, predicted router) - not started.
 
