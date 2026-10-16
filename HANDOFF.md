@@ -1,3 +1,80 @@
+# Xolotl — HANDOFF (2026-10-16, session 3 — CURRENT; sessions 1-2 below are history)
+
+**State in one line:** all four models (DeepSeek-V4.1-Flash, GLM-5.3-Flash, Qwen3.8-Flash-Next, Qwen3.8-27B dense) +
+the legacy DeepSeek-V4-Flash-0731 engine run from THIS tree, verified against each one's previous production build;
+the live wrappers point here; the old trees are in `~/AI/Strata-Backup`.  **Nothing pushed.**  Mal: push only when
+DSV4.1 is definitely up to scratch + the README carries every model's measured numbers.
+
+## S3.0 Resume
+
+```bash
+cd ~/AI/Xolotl && git status --short && git log --oneline -8
+cat verify/e2e/final-think.log; cat verify/e2e/final-think/{score,speed}.txt   # the README table's source run
+```
+Then: fill README.md's {{...}} placeholders from score.txt / speed.txt (taskeval.py score / speed), fresh-clone build
+test (S3.5), rebuild build-xolotl + build-vision against third_party/llama.cpp (S3.5), then ask Mal for the push.
+
+## S3.1 Where everything is now
+
+| what | where |
+| --- | --- |
+| the engine | `~/AI/Xolotl` branch `xolotl` (remotes: `github` = Indras-Mirror/Strata-DSV4.1, `github-glm`, `niko` = upstream, `perrone`, `origin` = the backed-up fork, `up` = ~/AI/Strata) |
+| patched llama.cpp | `third_party/llama.cpp` (untracked, gitignored) = llama.cpp `3cf03257` + `tools/xolotl/ggml/xolotl-ggml.patch` (verified identical, diff -r). Fresh checkout: `bash tools/xolotl/fetch-llama.sh` |
+| builds | `build-xolotl/` (all engines; CMakeCache still says STRATA_GGML_DIR=~/AI/Strata-DS4/... -> RECONFIGURE to third_party/llama.cpp before the next build), `build-vision/` (strata-vision; same) |
+| OG upstream | `~/AI/Strata` (kept: its `.venv` runs every server; `data/expert-profile*.bin` used by the Qwen Flash config) |
+| model data | `~/AI/Strata-data` (Qwen Flash packs + MTP) - keep |
+| backup | `~/AI/Strata-Backup/`: Strata-DS4 (+ worktrees Strata-GLM/-um/-rebase/MiMo, repaired), Strata-qwen, strata-dense-build/-runtime, Strata-DS4-private, models-dense, v41-dev. Rollback binaries kept (build-ds4-gpu, build-glm-gpu, strata-dense-build). 89 GB of big intermediates deleted with Mal's OK - manifest `DELETED-2026-10-16.txt` |
+| wrappers | strata-quetza (configs `~/.quetza-data/xolotl/`), strata-dense-quetza (draft 3), strata-glm-quetza, strata-ds41-quetza -> Xolotl; backups `*.bak-prexolotl-20261016`. qwen3.8-swift-quetza-ninfer: model path fixed (moved to /media/Crucial1TB/models/ninfer). v41allday/v41calib symlinks -> Xolotl tools |
+| e2e harness | `tools/taskeval` (smoke + HumanEval-21 + tools-10 + agentic-3; `speed` = prefill/decode during the tasks; `TASKEVAL_THINK_BUDGET`) |
+
+## S3.2 Bugs found this session (all fixed + committed)
+
+| # | what | mechanism |
+| --- | --- | --- |
+| 12 | every Qwen request failed: `'Tokenizer' object has no attribute '_re'` | fork renamed `_re`->`_pre_res`, dense lineage still read `_re`; clean textual merge |
+| - | strata-dense (27B) not built at all | its CMake target only ever existed uncommitted in /tmp/strata-dense-eval; reconstructed (+ Q5_0/Q6_K MMQ) |
+| - | `/v1/decide` missing on the dense engine | the score= edit was also only in /tmp; re-implemented |
+| - | voice sidecar: cold start killed under the first request; children outlived SIGTERM | last_used=0 until after ensure(); no closer |
+| 13 | V4-0731 lost layer 42 (`profile: per token 252`) | GLM's unconditional `block_count - nextn_predict_layers`; now only when blk.N.nextn.* exists |
+| - | GLM serve OOM on prompts <= 256 tokens (production too) | shrink only for >256 but every prompt took the chunk path |
+| - | GLM/DSV4.1 shims ran ~/AI/Strata's 0.1.39 server, not this tree's | moved; then 3 drifts vs 0.1.44: run(force=), finish(reason=), template.caps; and the call-opener follower guard (`<function=`) that turned every DSML/GLM tool call into text -> `F.FUNC_START = ""` in both shims |
+| - | a fresh clone could not build | ggml patches only in an untracked tree -> one patch on the pin |
+
+## S3.3 Merges this session
+* upstream **Strata 0.1.44.1** (Niko1221 main 296b59d2, 282 commits): 11 conflicts, unions.  Deliberate deviation:
+  K-quant MMQ stays static + always on (upstream made it a run-time opt-in DSO -> would switch off the dense and GLM
+  prompt paths).  Gave Qwen Flash decode 116.5 -> 151 tok/s.
+* the Strata-qwen voice work (uncommitted there) - voice.py, /v1/audio/*, --audio-pad/SVA1, tools/audio.
+* NOT merged: mimo (Mal: drop it; weights deleted).  perrone/qwen3.8-27b = same dense code as ours.
+
+## S3.4 Verified (logs in verify/, untracked)
+* DSV4.1: logits bit-identical; e2e (non-thinking) Xolotl 20/21 / 10/10 / 3/3, 5391 tok, 596 s == production 598 s;
+  decode during tasks 27.5 vs 27.8 tok/s.
+* GLM: engine within production's own noise; serve GEN lines byte-identical; tool calls identical at every split.
+* Qwen Flash: identical greedy chat + image answers; decode 151 vs 116.5, prefill 3577 vs 3509 (speedbench).
+* 27B: teacher-forced mean |dlogprob| 0.015 (newer ggml MMQ in the prompt path); decode 116 (draft 3) vs 105;
+  prefill 1240 vs 1331 (-7%, OPEN: newer MMQ kernels; nsys both to find it).  NInfer on the same bench: 4402 / 176.
+* V4-0731: ppl 10.39 vs production 10.41-10.51, decode 19.4 vs 19.3.
+* serve suite 733 tests; test_serve_ds41.py all passed.
+
+## S3.5 Still to do before a push (in order)
+1. finish the thinking run -> README table (placeholders {{...}}).
+2. fresh clone of this repo into scratch, configure WITHOUT STRATA_GGML_DIR, build (proves the patch path).
+3. reconfigure build-xolotl / build-vision: `-DSTRATA_GGML_DIR=$PWD/third_party/llama.cpp`, `-DLLAMA_DIR=...` (full
+   rebuild ~8 min; do not run while benchmarking - it skews CPU-pool speeds).
+4. Mal's go, then: push `xolotl` -> github `main` (it fast-forwards over 9d6529fc; the graft replace-ref does not push and
+   is not needed for that), set repo description/topics (draft in docs/brand/XOLOTL_BRAND.md), social preview image.
+
+## S3.6 Open (not blockers)
+* 27B vs NInfer: prefill 3.5x / decode 1.5x behind; the gap is int8 GEMM kernels + spec depth. Options: port kernels,
+  or serve the 27B through NInfer. Mal to decide.
+* the 27B -7% prefill vs production; GLM <=16-token prompts now use the decode loop (fine, but slower than MMQ for 17-256).
+* llama.cpp b11390 (MoE MMQ temp-buffer padding fix) - check whether xolotl-ggml.patch already covers it.
+* NVIDIA's Qwen3.8-Flash-Next NVFP4 QAD: readable now (NVFP4 W4A8); waiting for an abliterated one; needs ~102 GB disk.
+
+
+---
+
 # Xolotl — MERGE HANDOFF (2026-10-16, session 2)
 
 **Goal (unchanged):** ONE engine, ONE tree, serving **GLM-5.3-Flash + Qwen 3.8 27b dense + Qwen
