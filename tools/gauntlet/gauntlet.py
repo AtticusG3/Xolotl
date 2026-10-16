@@ -303,17 +303,24 @@ def run(url, out, only):
 
 
 def score(dirs):
-    print(f"{'run':28s} {'pass':>6s} {'partial':>7s} {'trunc':>5s} {'tok':>7s} {'secs':>6s} {'decode tok/s':>13s}  passed")
+    # throughput (local engines; the API reports no timings): decode = generated tokens / decode time, prefill = NEW
+    # prompt tokens / prefill time (reused prefix excluded), e2e = completion tokens / wall time of every request
+    print(f"{'run':28s} {'pass':>6s} {'partial':>7s} {'trunc':>5s} {'tok':>7s} {'secs':>6s} {'decode tok/s':>13s} "
+          f"{'prefill tok/s':>13s} {'new/reused prompt':>19s} {'e2e tok/s':>9s}  passed")
     for d in dirs:
         g = json.load(open(os.path.join(d, "gauntlet.json")))
         ts = [t["timings"] for t in g.get("timings", []) if t.get("timings")]
         dn, dms = sum(t.get("predicted_n", 0) for t in ts), sum(t.get("predicted_ms", 0) for t in ts)
+        pn, pms = sum(t.get("prompt_n", 0) for t in ts), sum(t.get("prompt_ms", 0) for t in ts)
+        cn = sum(t.get("cache_n", 0) for t in ts)
         rs = g["tasks"]
         part = sum(r.get("partial", _partial(r["ok"], r.get("hidden_output", ""))) for r in rs)
+        tok, secs = sum(r['tokens'] for r in rs), sum(r['secs'] for r in rs)
+        rate = lambda n, ms: f"{1000 * n / ms:.1f}" if ms > 0 else "-"
         print(f"{os.path.basename(d.rstrip('/')):28s} {sum(r['ok'] for r in rs):>3d}/{len(rs):<2d} {part:>7.2f} "
               f"{sum(r.get('truncated', -1) for r in rs) if all('truncated' in r for r in rs) else '?':>5} "
-              f"{sum(r['tokens'] for r in rs):>7d} {sum(r['secs'] for r in rs):>6.0f} "
-              f"{1000 * dn / max(dms, 1e-9):>13.1f}  {' '.join(r['id'][:2] for r in rs if r['ok'])}")
+              f"{tok:>7d} {secs:>6.0f} {rate(dn, dms):>13s} {rate(pn, pms):>13s} {f'{pn}/{cn}':>19s} "
+              f"{tok / max(secs, 1e-9):>9.1f}  {' '.join(r['id'][:2] for r in rs if r['ok'])}")
 
 
 if __name__ == "__main__":
