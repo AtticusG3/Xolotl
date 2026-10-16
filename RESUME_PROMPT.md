@@ -1,4 +1,212 @@
-# RESUME PROMPT — Xolotl (the unified Strata engine) — written 2026-10-16 ~17:00, end of session 3
+# RESUME PROMPT — Xolotl — START HERE (written 2026-10-17 ~08:20, end of session 5; sessions 1-4 below are history)
+
+You are resuming a multi-session project for **Mal** (Malich Coory, Indra's Mirror). This block is self-contained: read
+it, then `sed -n '1,80p' HANDOFF.md` (the session-5 block). Everything here marked **measured** was measured on this box
+(RTX 4090 24 GB · Ryzen 7 5700X · 90 GB DDR4 · NVMe) - do not re-derive it. The sections below this block are older
+sessions' history; trust this block where they disagree.
+
+## 6.0 FIRST THING: who owns the GPU (a collision cost session 5 an hour)
+
+At the end of session 5 **another Claude Code session (`bfd97150-47cf-45df-ab05-f58bc1967b3d`, the continuation of the
+session-4 ds41-prefill conversation) was running ds41 turnbench experiments in this same tree, on the same GPU and the
+same port 8151.** Both sessions' scripts start a server on :8151 and `pkill -x strata/ds41_generate` on teardown, so they
+killed each other's engines (exit 143), interleaved requests on one server (prefix reuse lost, prefill halved), and the
+ds41 throughput numbers of session 5's last two probes are INVALID. Before any GPU work:
+
+```bash
+ps -eo pid,lstart,args | grep -E "[c]laude --|[t]urnbench|[s]erve_ds41|[g]auntlet.py run|ds41_generate|glm_generate" | cut -c1-160
+ss -ltnp | grep -E ":81(4[0-9]|5[0-9]) "      # anything on 8140-8159?
+nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader   # the desktop alone is ~0.7-0.9 GB
+grep -n "engine started" /tmp/strata-ds41.log | tail -3                     # a ds41 start you did not make = someone else
+```
+
+If another session is using the GPU, **ask Mal which one owns it** (session 5 recommended: one owner; the other does
+CPU-only work). Consider using a different port than 8151 for your own servers (e.g. 8161) so a peer's teardown
+(`ss sport = :8151` + kill) cannot hit you - `verify/e2e/gauntlet-local-all.sh` hard-codes 8151 (URL + down()).
+
+## 6.1 What is DONE and PUBLIC (session 5)
+
+- **GitHub: `Indras-Mirror/Strata-DSV4.1` was renamed to `Indras-Mirror/Xolotl`** (Mal's go). 24 stars kept; the old
+  URL 301-redirects; fast-forward push of branch `xolotl` -> `main` (never force). Local remote `github` already points
+  at the new URL. Description + topics set (strata, deepseek, deepseek-v4, glm, qwen, moe, ...). **Mal OK'd pushing
+  updates to main this session** (README/numbers/docs) - keep pushes fast-forward and announce them.
+  Still manual for Mal: Settings -> Social preview = `docs/brand/assets/github-social-preview-1280x640.png`.
+- **README rebuilt headline-first** (`README.md`): DeepSeek-V4.1 is the headline; "a Strata fork, heavily extended"
+  (Strata's core kept, ~71K lines added: 1,368 commits, +71,049/-259 in src/include/tools/serve vs Niko1221/Strata main);
+  a note for Strata-DSV4.1 stargazers; the model table (columns **Prefill | Decode**, Mal's naming); quick start; one
+  paragraph of how-it-works; links to the deep pages **`docs/xolotl/HOW_IT_WORKS.md`** and **`docs/xolotl/BENCHMARKS.md`**;
+  short credits. The **Gauntlet is deliberately OUT of the public docs** until it is refined and every model re-run
+  (Mal). `README.*.md` translations are still the OLD content (not updated).
+- **Hugging Face card** `IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored` updated (README only, commit abd78744):
+  engine = Xolotl (formerly Strata-DSV4.1), a 2026-10-17 update note (HumanEval 21/21, tool 10/10, agentic 3/3, 26.8 tok/s;
+  small-turn prefill, adaptive arena), `build-xolotl` build/run steps, tag `xolotl`. Local copy:
+  `verify/s5/hf-card-README.md` (upload with `huggingface_hub.HfApi().upload_file`, path_in_repo README.md).
+- **Brand**: Mal's final picks are in `Assets/` (committed): `circle.1.png` = THE logo, `wordmark-banner...2.png` = the
+  banner, `hero...2.png`. Composed locally (PIL, no image credits) into `docs/brand/assets/`: `logo-circle-400.png`
+  (README credits), `avatar-512/256.png`, `favicon.ico`, `favicon-64.png`; `readme-header-1200.png` = the banner.
+  `docs/brand/XOLOTL_BRAND.md` has a FINAL section. Do not generate new images (OpenRouter credits).
+
+## 6.2 Engine state (all committed, branch `xolotl`, pushed)
+
+- **`build-xolotl` is the one build** - fully rebuilt this session with the README's exact configure line
+  (`-DSTRATA_GGML_DIR=$PWD/third_party/llama.cpp`, the pinned llama.cpp 3cf03257 + `tools/xolotl/ggml/xolotl-ggml.patch`;
+  `STRATA_Q6K_EXPERTS` = default ON). Its old cache pointed at the moved `~/AI/Strata-DS4`; fixed. A fresh `git clone` +
+  `tools/xolotl/fetch-llama.sh` + that cmake line configures cleanly (checked; the full compile of a fresh clone was NOT
+  run - only the in-tree full build). `build-pf` (session 4's ds41-only dir) is obsolete.
+- **ds41: the conversation-adaptive arena is ON by default** (cff4bb24; `STRATA_ARENA_REBAL=0` = off). Measured
+  (turnbench 4K base + 8 turns, 20 s gaps): file-tier reads per small turn -21..-30 %, small-turn wall 8.48 -> 7.60 s;
+  2,561 swaps all published, `DS41_CHECK_ARENA=1` byte check 0 bad; e2e with it on (`verify/e2e/final-think/r_ds41_rebal`):
+  21/21 he, 10/10 tool, 3/3 agentic, decode 26.8 tok/s. The full build caught a CPU-target bug (the `Rebal` forward
+  declaration was inside the CUDA guard) - fixed in the same commit.
+- **GLM: `--route-bias-file X` added and `--route-bias` made DECODE-only** (7d7775c1, opt-in; NO served config uses them
+  yet). File-tier = neither VRAM cache nor RAM arena. The table resets after each request so the prompt routes exactly.
+  `GLM_BIAS_PROMPT=1` (one-shot, `--prefill-chunk 0`) applies the decode biases to the prompt so `--ppl` measures them.
+- **Wrappers repointed** (`~/.local/bin`, backups `*.bak-20261017`): `strata-ds41-quetza` and `strata-glm-quetza`
+  checked for `build-ds4-gpu/` / `build-glm-gpu/` (absent in Xolotl) -> now `build-xolotl/`. `strata-quetza` and
+  `strata-dense-quetza` already used build-xolotl. Wrappers were NOT launched end to end this session.
+- **`tools/throughput.py`** (new): one headline probe per model - a fresh ~N-token prompt (prefill), a decode request,
+  a +200-token agent turn; server timings. Wired into the lane script (`GAUNTLET_THROUGHPUT_ONLY=1`).
+
+## 6.3 Measured numbers (the ones to quote)
+
+| model | prefill (fresh prompt, server) | decode (HumanEval e2e, thinking 32K) | HumanEval / tool / agentic |
+| --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | ~210 tok/s @7.8K (session 4); **263.8 tok/s @16.7K** (s5, fresh server, valid); ~350-390 @20K (V4.1 notes) | 26.8 (arena on) | 21/21, 10/10, 3/3 |
+| GLM-5.3-Flash | not measured with a sane config yet | ~28 (partial run, skip config) | partial (5 of 21) |
+| Qwen3.8-Flash-Next | **3,430 @6.5K / 3,005 @16.7K** (upstream Strata 10-05 build on the same prompts: 3,378 / 2,933) | 127.8 | 21/21, 10/10, 3/3 |
+| Qwen3.8-27B dense | **1,385 @6.5K / 1,244 @16.7K** | 98.5 | 21/21, 10/10, 3/3 |
+
+The old README prefill numbers (Qwen Flash 475, 27B 1,097) were HumanEval's short prompts (a few hundred new tokens:
+fixed per-request cost dominates) - replaced. README now shows the probe numbers. A +300-token agent turn on Qwen
+Flash costs 0.7-0.8 s; on 27B 0.4-0.6 s.
+
+**ds41 throughput is the open item:** the s5 probes on 8K gave prefill 129-177 tok/s and decode 12-17 tok/s, but those
+runs were contaminated by the other session's interleaved turnbench (see 6.0). Re-measure on a quiet box:
+`GAUNTLET_THROUGHPUT_ONLY=1 GAUNTLET_OUT=throughput-ds41 THROUGHPUT_PROMPTS="8000 20000" bash verify/e2e/gauntlet-local-all.sh ds41`
+then A/B decode with `STRATA_ARENA_REBAL=0` (the arena's reader thread reads NVMe while decode also reads the file tier -
+rule out that it costs decode; the HumanEval e2e says 26.8 with it on, so likely fine). Note the prompt batch is sized
+from free VRAM (`serve: VRAM X GiB free -> prompt batch N (of 12288)`): a desktop app holding VRAM (Teams, a browser)
+shrinks it and lowers prefill.
+
+## 6.4 GLM: the investigation and the decision that is pending
+
+Session 4's served config (`tools/glm/serve/strata-glm-maya-abl-512k.json`: `--skip-miss/--skip-file/--skip-file-prefill
+0.15 --renorm-skip --prune prune-ezct-0.25.txt --prune-penalty 0.05`) **corrupts tool calls** (byte-salad names, mojibake
+after `<tool_call>`, "I'm sorry, I cannot..." loops; Gauntlet core 0/6). The engine's own comment
+(`tools/glm/glm_generate.cpp`, `--lora-exps` block) says why: a skipped expert loses its abliteration-LoRA delta, the
+ablation stops being all-or-nothing, "the model loops"; `--renorm-skip` is the "test" escape hatch the config used.
+Greedy A/B (`verify/s5/glmab/`): the pre-merge build and Xolotl give identical tool calls with exact routing -> **the
+merge is clean**; corruption appears only with the skip/prune approximations.
+
+The fix = the ds41 recipe (soft, every expert reachable, full LoRA delta): no `--skip-*`, keep the soft prune, add
+`--route-bias 0.5 --route-bias-file 0.3` (ds41's served values; decode only). Perplexity sweep (`--ppl`, teacher-forced
+2,586-token agentic transcript = the 03 raytracer task + its reference solution rendered in GLM's chat template with
+tool calls, `verify/s5/glmq/agentic03.ids`; biases applied to the prompt via GLM_BIAS_PROMPT; 200-token decode):
+
+| config | ppl | decode tok/s | experts from VRAM cache |
+| --- | ---: | ---: | ---: |
+| E exact (no prune) | 8.00 (repeat 8.14) | ~11 | 32-34 % |
+| P soft prune 0.05 | 7.89 | 11.3 | 32 % |
+| **B1 prune + bias 0.5 / file 0.3** | **4.32** | **35.0** | **98.7 %** |
+| B2 prune + bias 1.0 / file 0.6 | 7.20 | 39.5 | 100 % |
+| SK the served skip config | 4.99 | 28.2 | 38 % (176 entries/token skipped) |
+| EG exact, `--pcie 1.0` (no CPU pool) | 8.21 | 9.9 | 30 % |
+| EP exact, `--pf-b 0` (no prefetch) | 8.17 | 9.7 | 24 % |
+| EN exact, no LoRA | 8.50 | 11.5 | - |
+| B1N bias 0.5/0.3, no LoRA | 4.67 | 38.2 | 98.9 % |
+| ED exact, LoRA dense-only | 8.41 | 11.7 | 36 % |
+| R exact, PRE-MERGE binary (per-token) | 7.84 | 10.4 | 34 % |
+| EC exact, chunked MMQ prompt path | 8.11 | - | - |
+| RC exact, chunked, PRE-MERGE binary | 8.06 | - | - |
+
+Reading it: **no engine bug** - exact routing gives the same ppl on two independent code paths (per-token and chunked
+MMQ) and on both builds, with/without the CPU pool, prefetch and LoRA. Biasing toward the VRAM-cached (census-hot)
+experts LOWERS agentic-text ppl (8.0 -> 4.3). The same thing is documented for DSV4.1 (README.strata.md, the V4.1
+section: "agentic text 15.11 -> 6.39 (better: the GSQ quant gave its cheapest formats to rarely-used experts)") - the
+Maya-S-v2 quant evidently degrades its cold experts the same way. B2 (stronger bias) is worse than B1: too much
+distortion. **Provisional winner: B1** - 3.5x faster decode than exact, ppl better than exact on agentic text.
+
+**Still to do before switching GLM's served config (in order):**
+1. The chat-text cross-check (the s5 attempt was invalid - the IDS override was ignored): exact is documented at ppl
+   ~5.27-5.34 on the old gate's `eval_chat` (Maya+LoRA). Run `bash verify/s5/glmq/glm_sweep.sh XE XB1 XB2` (~10 min,
+   GPU must be free). B1 should not be much worse than XE on chat; if it is, consider bias 0.25/0.15.
+2. New served config: copy `tools/glm/serve/strata-glm-maya-abl-512k.json` -> drop `--skip-miss 0.15 --skip-file 0.15
+   --skip-file-prefill 0.15 --renorm-skip`, add `--route-bias 0.5 --route-bias-file 0.3` (keep `--prune ... --prune-penalty
+   0.05`, soft). Serve it, then the malformed-call replay (`verify/s5/glmab/ab.sh` pattern: Gauntlet 13/14 step-1
+   requests `verify/s5/glmab/13.json` `14.json`, greedy) and the HumanEval e2e
+   (`TASKEVAL_THINK_BUDGET=32768 python3 tools/taskeval/taskeval.py run http://127.0.0.1:<port> verify/e2e/final-think/r_glm2`).
+   Also the throughput probe. Then fill the README GLM row (it says "numbers coming") and push.
+3. Mal's rule (memory `feedback-soft-prune-only`): every expert must stay reachable (penalty, never mask) and report the
+   ppl cost - B1 satisfies it; the `--skip-*` flags do NOT (they drop experts).
+
+## 6.5 The Gauntlet (benchmark) - v2 built, needs refining + an overnight run of every model
+
+`tools/gauntlet/` (README.md documents v1; v2 = f37a229d). **v2 rules** (Mal): `GAUNTLET_TURNS` turns per task
+(default **10**), **no token budget** (each turn: the served 32K thinking budget + 4096 answer), the hidden tests grade a
+COPY of the workspace after every turn that wrote a file or ran code (the model never sees it) -> a progress curve and
+the turn the task was first solved (the task ends there); progress is normalised from the untouched workspace's own
+score (01 starts at 0.61, 10 at 0.60, 12 at 0.07 - no free credit); `score` = solved count, SCORE = sum of progress,
+mean solve turn, throughput (decode / prefill-of-new-tokens / new+reused / e2e). `selftest.py` = 7 cases a-g, all PASS
+(f = a local engine's think budget - the bug that graded every local task as a runner error until 5ed4adf8; g = per-turn
+grading). `validate.py <task dir>` must say OK for every task you change.
+
+**v2 core set: 01, 02, 03, 06, 07, 10, 14** (replaced 12/13/15/16 that nobody passed - even API at max effort fails
+15/16). **API baseline (done, do NOT re-run - credit): `out/gauntlet-v2-api`: 5/7, SCORE 6.41**, solved 01@4 02@3 07@9
+10@4 14@4, 03 stuck at 0.50 (scene B), 06 at 0.91, 106,792 tokens, 546 s.
+v1 core results (old set, 12K budget, for history): API 1/6, qflash 1/6, q27 0/6, ds41 0/6, GLM served 0/6, GLM exact 1/6.
+
+Mal: "leave the gauntlet out until it's refined for better pass rate, and we redo all our models overnight tonight."
+Next:
+1. Calibrate on the fastest local model first (small test): `GAUNTLET_OUT=gauntlet-v2 bash verify/e2e/gauntlet-local-all.sh qflash`
+   (~10-20 min). Look at the spread: a set where every local model scores 0 solved is useless; target each model
+   solving some and partially progressing on others.
+2. Refine for pass rate if needed: add 1-3 medium tasks (same format: `tasks/NN-name/{task.json,workspace,hidden,
+   reference,trap}`; rules in tools/gauntlet/DESIGN.md + HARDENING.md; `validate.py` must pass; derivability: every
+   hidden assertion maps to a documented sentence). Keep the API from being re-run more than once per set version.
+3. Overnight: `GAUNTLET_OUT=gauntlet-v2 bash verify/e2e/gauntlet-local-all.sh ds41 qflash q27 glm` - but first change the
+   `glm)` line in that script to the NEW GLM config (6.4 step 2). The lane runs the throughput probe after each model.
+   ds41 will be the slow one (~21 tok/s decode; budget ~1.5-2 h). Score: `python3 tools/gauntlet/gauntlet.py score
+   out/gauntlet-v2-api verify/e2e/gauntlet-v2/*/`.
+4. Then put the v2 results back into README/`docs/xolotl/BENCHMARKS.md` (removed in 29bb3c1a) and push.
+
+## 6.6 Where everything is
+
+| what | where |
+| --- | --- |
+| lane script (serve -> gauntlet -> throughput -> teardown per model) | `verify/e2e/gauntlet-local-all.sh` (local-only: `verify/` is in `.git/info/exclude`). Env: GAUNTLET_OUT, GAUNTLET_ONLY, GAUNTLET_TURNS, GAUNTLET_THROUGHPUT_ONLY, THROUGHPUT_PROMPTS, DS41_BUILD; models ds41 qflash q27 glm glm-exact |
+| e2e (HumanEval/tool/agentic) | `tools/taskeval/taskeval.py run|score|speed`; results `verify/e2e/final-think/r_{ds41,ds41_rebal,qflash,q27,glm(partial)}`; `taskeval.py score` crashes on `r_glm` (no results.json) - list dirs explicitly |
+| session-5 experiments (scripts, inputs, logs) | `verify/s5/{glmq,glmab,qpf,rebal}/`; the clean GLM sweep = `verify/s5/glmq/glm_sweep.sh` |
+| throughput probes | `verify/e2e/throughput/{q27,ds41}/`, `verify/e2e/throughput-ds41b/` (ds41 ones contaminated except the 16.7K 263.8) |
+| Gauntlet runs | `out/gauntlet-v2-api` (v2 API), `out/gauntlet-core-api` + `verify/e2e/gauntlet-local/*` (v1 core) |
+| configs | ds41 `tools/v41/serve/strata-ds41.json` + `ds41-engine.sh`; GLM `tools/glm/serve/*.json` + `glm-engine.sh`; Qwen Flash `~/.quetza-data/xolotl/strata-swift-iq3_xxs-sc117-lazyvision.json`; 27B written by `strata-dense-quetza` (lane copy `verify/e2e/gauntlet-local/cfg_q27.json`) |
+| old trees (reference builds) | `~/AI/Strata-Backup/{Strata-DS4,Strata-GLM,...}`; pre-merge GLM binary `~/AI/Strata-Backup/Strata-GLM/build-glm-gpu/glm_generate`; upstream Strata `~/AI/Strata/build/strata` (10-05) |
+| engine logs | ds41 `/tmp/strata-ds41.log` (SHARED by every ds41 server - grep "engine started" for timestamps); GLM per-config `log` key |
+
+## 6.7 Rules (Mal's standing constraints)
+
+- Measure before concluding; A/B against the previous production build; small tests before full runs; report the
+  numbers with what they were measured on.
+- Soft prune only (penalty, never a mask/skip); report the ppl cost of any speed trick.
+- **API credit**: one DeepSeek API baseline per benchmark version (memory `feedback-api-credit`); calibrate on locals.
+- Never `pkill -f` a pattern that matches your own command line; kill exact PIDs.
+- **Never edit a bash script that is currently running** - bash reads scripts incrementally; session 5 broke a running
+  sweep this way (`syntax error near ;;`). Copy to a new file and run the copy.
+- Build per-run args INSIDE the run function when env overrides are used (the IDS bug).
+- Commit as you land; `/tmp` does not survive a reboot (copy scratch results into `verify/`).
+- Public pushes: fast-forward only; Mal OK'd README/numbers/docs updates to `Indras-Mirror/Xolotl` main in session 5.
+  Anything destructive (force push, history rewrite, deleting releases/model files) still needs his explicit go.
+- NSFW hard rule (global CLAUDE.md) applies to any image work.
+
+## 6.8 Done looks like
+
+- GLM on the B1-style config with clean tool calls, its README row filled from a real e2e + throughput run.
+- ds41 throughput re-measured on a quiet box (8K and 20K prefill, decode) and the README row confirmed or corrected.
+- Gauntlet v2 refined, every model run overnight, results in README/BENCHMARKS, pushed.
+- Optionally: translations updated or removed from the README links; social preview uploaded (Mal).
+
+---
+
+# HISTORY (sessions 1-4) — RESUME PROMPT — Xolotl (the unified Strata engine) — written 2026-10-16 ~17:00, end of session 3
 
 You are resuming a multi-session project for **Mal** (Malich Coory, Indra's Mirror). Read this whole file, then the top
 block ("session 3") of `~/AI/Xolotl/HANDOFF.md`. Do not re-derive anything this file states as measured. Mal's rules
@@ -302,7 +510,7 @@ model has been through the hardened set yet.**
 
 ---
 
-# 14. START HERE — the detailed continuation brief (session 4, 2026-10-16 ~19:00)
+# 14. (HISTORY) the session-4 continuation brief (2026-10-16 ~19:00) - superseded by the START HERE block at the top
 
 **Sections 11-13 below are history of how we got here. Read this section, then `TOOLS/GAUNTLET`'s docs, then work the
 list. Nothing is running; the GPU is Mal's (he is gaming) — do not start an engine without him saying so.**

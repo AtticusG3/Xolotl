@@ -1,4 +1,22 @@
 # Xolotl — HANDOFF (2026-10-17, session 5 — CURRENT; session 4 and earlier below are history)
+**RESUME = the "START HERE" block at the top of `RESUME_PROMPT.md`** (written at the end of session 5, ~08:20). It
+supersedes S5.2/S5.3 below where they disagree (e.g. the adaptive arena is now ON by default, GitHub is pushed and the
+repo renamed to Indras-Mirror/Xolotl).
+
+## S5.0 Session 5, second half (2026-10-17 05:40-08:20) in one list
+- Arena ON by default (cff4bb24); `build-xolotl` fully rebuilt with the README configure line (pinned ggml in
+  third_party/llama.cpp; the old cache pointed at the moved Strata-DS4); a CPU-target bug fixed on the way.
+- Wrappers `strata-ds41-quetza` / `strata-glm-quetza` repointed to `build-xolotl/` (backups `*.bak-20261017`).
+- GLM `--route-bias-file` + decode-only `--route-bias` (7d7775c1, opt-in); the ppl sweep (RESUME 6.4) says the ds41
+  recipe (bias 0.5 / file 0.3) is 3.5x faster than exact with LOWER agentic-text ppl (4.32 vs 8.0) - the chat-text
+  cross-check is still to run; no served config changed yet.
+- Gauntlet v2 (f37a229d): 10 turns, no token budget, per-turn hidden grading, normalised progress; core set 01,02,03,06,
+  07,10,14; API 5/7 (SCORE 6.41) in `out/gauntlet-v2-api`. Out of the public docs until refined + all models re-run.
+- README rebuilt headline-first + docs/xolotl/{HOW_IT_WORKS,BENCHMARKS}.md; brand (Assets/ = Mal's picks); HF card
+  updated; GitHub renamed + pushed (fast-forward). Qwen prefill measured properly (Flash 3,005-3,430, 27B 1,244-1,385).
+- A second Claude session (bfd97150) ran ds41 turnbench on the same GPU/port: the s5 ds41 throughput probes are
+  contaminated (except 263.8 tok/s @16.7K on a fresh server). Re-measure on a quiet box.
+
 **State in one line:** every Xolotl model has now run the Gauntlet core set and the HumanEval e2e; README's two Qwen
 rows are filled; GLM's served config was found to corrupt tool calls under its skip/prune approximations (the merge is
 clean); the small-turn prefill fix (716cf901) is in `build-pf` only. **Nothing pushed.**

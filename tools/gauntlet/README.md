@@ -22,7 +22,26 @@ total - 03 fails one scene, 07 and 10 fail two cases, 04 fails two assertions; 0
 collapse. That is deliberate: the frontier sits on the task set, so a quantized engine falls below it rather than
 falling off a cliff.
 
-## Measured on every Xolotl model (2026-10-17, core set, 12K tokens per task)
+## v2 (2026-10-17) - turns, not tokens; graded every turn
+
+- **`GAUNTLET_TURNS`** turns per task (default **10**, the same for every model; 0 = the task's own `max_steps`), and
+  **no token budget** (`GAUNTLET_TASK_TOKENS` unset): each turn gets the served thinking budget + 4096 answer tokens.
+- After every turn that wrote a file or ran code, the hidden tests grade a **copy** of the workspace (the model never
+  sees the result; `GAUNTLET_PER_TURN=0` turns it off; `GAUNTLET_TURN_GRADE_SECS` caps that grade, default 120 s - the
+  final grade keeps the task's full `grade_timeout`). A run records each task's progress curve and the **turn it was
+  first solved** (the task ends there).
+- **Progress is normalised** from what the untouched workspace already scores (`start_fraction`: 01 starts at 0.61,
+  10 at 0.60, 12 at 0.07), so no run earns free credit. `score` prints solved/N, **SCORE** = the sum of progress (a
+  solved task = 1), the mean solve turn, and throughput (decode, prefill over new tokens, new/reused, e2e).
+- **The v2 core set: 01, 02, 03, 06, 07, 10, 14** (12, 13, 15, 16 dropped: nobody passed them; even the API at max
+  effort fails 15/16). Run: `GAUNTLET_TURNS=10 TASKEVAL_THINK_BUDGET=32768 gauntlet.py run <url> <out> --only
+  01,02,03,06,07,10,14` (local), or `bash verify/e2e/gauntlet-local-all.sh <models>` (serves each model in turn).
+- **API baseline (`deepseek-flash`, `out/gauntlet-v2-api`): 5/7 solved, SCORE 6.41** - 01@4, 02@3, 07@9, 10@4, 14@4;
+  03 stuck at 0.50 (scene B), 06 at 0.91; 106,792 tokens, 546 s. Local models: to be run (session 6).
+- `selftest.py` = 7 checks (a-g), all PASS; g = the per-turn grading (solved at turn 1 -> progress 1.0; an unfixed
+  workspace that already passes 20/33 scores progress 0.0).
+
+## Measured on every Xolotl model (2026-10-17, core set, 12K tokens per task) (v1, history)
 
 The **core set** is 03, 12, 13, 14, 15, 16 under `GAUNTLET_TASK_TOKENS=12000` (thinking included, identical for every
 engine) so one model costs at most 72K completion tokens; local engines think with `TASKEVAL_THINK_BUDGET=32768`.
