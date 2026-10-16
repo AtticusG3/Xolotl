@@ -288,11 +288,13 @@ model has been through the hardened set yet.**
   any path component). Measured: a planted `conftest.py` flipped 01's honest "13 failed, 20 passed" to a green
   "33 passed" before the fix. Every model-touching subprocess now runs with six variables (no credentials), proven
   by a probe that dumps `os.environ` from inside `run_python`.
-- **The one thing left is a measurement, and it is a model run:** 02 and 07 were last measured BEFORE their final
-  hardening; every other task's post-hardening API result is known (FAIL: 01, 03, 04, 05, 06, 08; PASS: 09, 10 -
-  and 09/10 have since been hardened again, so those need re-measuring too). Mal said stop model runs until the
-  benchmark is perfect - it now is. Next: `TASKEVAL_MODEL=deepseek-flash TASKEVAL_KEY="$DEEPSEEK_API_KEY"
-  TASKEVAL_NO_EFFORT=1 python3 tools/gauntlet/gauntlet.py run https://api.deepseek.com out/gauntlet-api-final`,
-  then the same on a local engine (`bash verify/e2e/gauntlet-local-ds41.sh`), then fill README/DESIGN from it.
+- **CALIBRATED (2026-10-16, `out/gauntlet-api-final`): `deepseek-flash` scores 3/10** on the frozen hardened set -
+  PASS 01, 02, 06 (all three at the 12-step ceiling, never submitting), FAIL 03, 04, 05, 07, 08, 09, 10; 246,337
+  completion tokens, 1,453 s. It scored 8/10 before the hardening. The misses are narrow (03 one scene, 07/10 two
+  cases, 04 two assertions; 05 collapses with 122 failures), i.e. the frontier sits on the set. Recorded in
+  `tools/gauntlet/DESIGN.md` + `HARDENING.md`.
+- **GPU: free. Mal is using it (a game) - do NOT start an engine without him saying so.** The local contrast is
+  queued, not run: `bash verify/e2e/gauntlet-local-ds41.sh` (expect hours: ~20 min was measured for a single hard
+  request at a 32K thinking budget). Then the pair to quote is API 3/10 vs quant N/10.
 - **Also still pending Mal's call:** the e2e resume (`verify/e2e/final-think-resume.sh`) for qflash + q27, and the
   push to Strata-DSV4.1.
