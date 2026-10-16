@@ -3,7 +3,13 @@
 **Why.** HumanEval-21 / tools-10 / agentic-3 (`tools/taskeval`) is saturated: DeepSeek-V4.1 scores 20/21 quantized and
 the full-precision API would too, so it cannot show what a quant, a route bias or an engine change *costs*. The Gauntlet
 is the opposite: **10 tasks that most models fail**, so a frontier API might score ~5/10 and a damaged quant 2/10 -
-the gap is the signal. It must stay **small: <= ~40 min for a whole run at ~25 tok/s** (one model, one GPU).
+the gap is the signal. It must stay **small**: 10 tasks, 12 agent steps each, no synthetic benchmark.
+RUNTIME, measured: the full-precision API does all ten in **~12 min** (700 s, 114K completion tokens). A local
+engine is a different matter - the step budget bounds its *actions*, not its tokens: with the 32K thinking
+budget the e2e run used, GLM spent 25,446 tokens on one problem (893 s at 28.7 tok/s) and fine-tuning this
+benchmark measured ds41 at ~20 min for a single hard request. Budget **~1-3 h for a local model**, not 40 min,
+and note which thinking budget a row was measured with (a local row at 32768 is not comparable to the API's
+native default).
 
 ## Rules every task must follow
 
