@@ -7,9 +7,13 @@
 Uses tools/taskeval's chat() (same request shape, TASKEVAL_THINK_BUDGET, timings recording) and parse_calls().
 Each task's workspace is staged in a temp dir; the model gets list_files / read_file / write_file / run_tests /
 submit; after it submits (or runs out of steps) the hidden tests are copied in and pytest decides pass / fail.
+A task whose task.json carries "answer" (an exact-answer task: no workspace, no hidden tests) is graded instead on
+whether that regex matches the model's final assistant message. A task with neither hidden tests nor an answer is
+ungradable and fails loudly - it is never scored PASS by accident.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,10 +52,25 @@ def _safe(d: Path, p: str) -> Path | None:
     return q if str(q).startswith(str(d.resolve())) and q != d.resolve() else None
 
 
+def _grade_answer(pattern, text: str) -> tuple[bool, str]:
+    """An exact-answer task: PASS iff `pattern` (a regex from task.json's "answer") matches the final message."""
+    text = text or ""
+    try:
+        m = re.search(pattern, text)
+    except re.error as e:
+        return False, f"error: task.json 'answer' is not a valid regex ({e}): {pattern!r}"
+    if m:
+        return True, f"answer regex {pattern!r} matched the final message: {m.group(0)!r}"
+    return False, f"answer regex {pattern!r} did NOT match the final assistant message ({len(text)} chars): {text[-400:]!r}"
+
+
 def run_task(url: str, task: Path) -> dict:
     meta = json.loads((task / "task.json").read_text())
     d = Path(tempfile.mkdtemp(prefix="gauntlet-run-"))
-    shutil.copytree(task / "workspace", d, dirs_exist_ok=True)
+    if (task / "workspace").is_dir():  # exact-answer tasks have no workspace
+        shutil.copytree(task / "workspace", d, dirs_exist_ok=True)
+    hidden_tests = sorted((task / "hidden").rglob("test_hidden_*.py")) if (task / "hidden").is_dir() else []
+    answer, final_content = meta.get("answer"), ""
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": meta["prompt"]}]
     log, toks, secs, test_runs, py_runs, submitted = [], 0, 0.0, 0, 0, False
     for _ in range(meta.get("max_steps", 12)):
@@ -59,6 +78,7 @@ def run_task(url: str, task: Path) -> dict:
         toks += j.get("usage", {}).get("completion_tokens", 0)
         secs += j["_secs"]
         m = j["choices"][0]["message"]
+        final_content = m.get("content") or final_content  # the last text the model produced (incl. the submit turn)
         calls = T.parse_calls(m)
         log.append({"content": m.get("content"), "calls": calls})
         if not calls:
@@ -109,8 +129,14 @@ def run_task(url: str, task: Path) -> dict:
             msgs.append({"role": "tool", "tool_call_id": c["id"], "content": res})
         if submitted:
             break
-    shutil.copytree(task / "hidden", d, dirs_exist_ok=True)
-    ok, out = _pytest(d, True)
+    if answer is not None:  # exact-answer task: the final message is the deliverable, there is nothing to run
+        ok, out = _grade_answer(answer, final_content)
+    elif not hidden_tests:  # nothing grades this task - say so loudly instead of passing it by default
+        ok, out = False, (f"error: task {meta['id']} has no hidden test_hidden_*.py files and no 'answer' key - "
+                          "nothing can grade it; refusing to report a silent pass")
+    else:
+        shutil.copytree(task / "hidden", d, dirs_exist_ok=True)
+        ok, out = _pytest(d, True)
     shutil.rmtree(d, ignore_errors=True)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
             "tokens": toks, "secs": round(secs, 1), "hidden_output": out[-1500:], "log": log}

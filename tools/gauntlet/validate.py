@@ -7,6 +7,7 @@
 
   python3 tools/gauntlet/validate.py [task-dir ...]      (default: every tasks/NN-*)
 """
+import json
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,20 @@ def stage(task: Path, overlay: str | None) -> Path:
     return d
 
 
+def ungradable(task: Path) -> str | None:
+    """An 'answer' task is graded on the transcript, a hidden-test task on pytest; with neither, nothing grades it."""
+    if "answer" in json.loads((task / "task.json").read_text()):
+        return None
+    if any((task / "hidden").rglob("test_hidden_*.py")):
+        return None
+    return "no hidden test_hidden_*.py files and no 'answer' key - nothing grades this task"
+
+
 def validate(task: Path) -> bool:
+    why = ungradable(task)
+    if why:
+        print(f"BAD  {task.name}: {why}")
+        return False
     checks = []
     d = stage(task, None)
     checks.append(("start: hidden FAIL", not pytest_ok(d, "hidden")))
