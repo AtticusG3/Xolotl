@@ -3,7 +3,7 @@
 
 This drives the REAL runner (`gauntlet.run_task`) in a subprocess against a canned OpenAI-shaped endpoint
 (`http.server`, 127.0.0.1:<free port>), so nothing here reimplements the runner - it is the runner's own answer,
-hidden-test and no-grader paths that are under test. Six checks, one line each; exit 0 only if all six hold:
+hidden-test and no-grader paths that are under test. Seven checks, one line each; exit 0 only if all seven hold:
 
   a) an exact-answer task whose canned final message MATCHES "answer" -> PASS
   b) the same task, canned message that does NOT match                 -> fail
@@ -16,6 +16,8 @@ hidden-test and no-grader paths that are under test. Six checks, one line each; 
   f) a) and d) again the way a LOCAL engine is run (TASKEVAL_THINK_BUDGET + GAUNTLET_TASK_TOKENS set): the
      per-step thinking/answer split must not disturb grading (2026-10-16: it overwrote the answer pattern, and every
      local task came back as a runner error)
+  g) per-turn grading: d) is recorded solved AT TURN 1 with progress 1.0 (the run stops there), and e)'s unfixed
+     workspace - which already passes 20 of 33 hidden tests at the start - scores progress 0.0, not 0.61
 
   python3 tools/gauntlet/selftest.py
 """
@@ -129,6 +131,8 @@ def main() -> int:
                      reply("fixed parse_amount", [call("c2", "submit", {"note": "done"})])]
             r = drive(url, real, solve)
             results.append(("d) real 01-ledger-rootcause, canned reference solution -> PASS", r["ok"] is True))
+            g_d = (r.get("solved_turn") == 1 and r.get("progress") == 1.0 and r.get("curve") == [[1, 1.0]]
+                   and r["steps"] == 1)
 
             local = {"TASKEVAL_THINK_BUDGET": "32768", "GAUNTLET_TASK_TOKENS": "12000"}
             fa = drive(url, ans, [reply("answer: 42", [call("c1", "submit", {"note": "done"})])], local)
@@ -151,6 +155,9 @@ def main() -> int:
                                   reply("planted, still broken", [call("c2", "submit", {"note": "done"})])])
             e_stripped = (r["integrity"]["removed"] == ["conftest.py"] and r["ok"] is False
                           and "failed" in r["hidden_output"] and "passed" in r["hidden_output"])
+            g_e = r.get("progress") == 0.0 and r.get("solved_turn") is None and r.get("start", 0) > 0.5
+            results.append((f"g) per-turn grading: solved@turn {g_d and 1} with progress 1.0 / an unfixed workspace "
+                            f"progress {r.get('progress')} (start {r.get('start')})", g_d and g_e))
             results.append((f"e) workspace cannot grade itself: refused {sorted(refused)} as 'interfere with "
                             f"grading', stripped {r['integrity']['removed']} -> real hidden result kept "
                             f"({r['hidden_output'].strip().splitlines()[-1][:40]!r})", e_refused and e_stripped))

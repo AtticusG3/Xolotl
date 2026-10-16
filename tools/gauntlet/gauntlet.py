@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -172,6 +173,44 @@ def _partial(ok: bool, out: str) -> float:
     return round(n.get("passed", 0) / total, 4) if total else 0.0
 
 
+def _grade_snapshot(d: Path, task: Path, timeout: int) -> tuple[bool, str, list[str]]:
+    """The hidden tests on a COPY of the workspace (the live one never sees them): strip anything that could grade
+    itself, copy hidden/ in, run pytest. Returns (ok, output, stripped names)."""
+    g = Path(tempfile.mkdtemp(prefix="gauntlet-grade-"))
+    try:
+        shutil.copytree(d, g, dirs_exist_ok=True)
+        gone = _strip_grading_names(g)  # plant a harness file and it is gone before it can grade
+        shutil.copytree(task / "hidden", g, dirs_exist_ok=True)
+        try:
+            ok, out = _pytest(g, True, timeout)
+        except subprocess.TimeoutExpired:
+            ok, out = False, f"hidden grading exceeded its {timeout} s budget"
+        return ok, out, gone
+    finally:
+        shutil.rmtree(g, ignore_errors=True)
+
+
+_START = {}  # task id -> the hidden fraction its UNTOUCHED workspace already scores (free credit, subtracted)
+
+
+def start_fraction(task: Path) -> float:
+    """What the starting workspace scores on the hidden tests before the model does anything (12's stub passed 1 of
+    14 - credit nobody earned). Progress is measured from here."""
+    meta = json.loads((task / "task.json").read_text())
+    if meta["id"] not in _START:
+        if meta.get("answer") is not None or not (task / "hidden").is_dir() or not (task / "workspace").is_dir():
+            _START[meta["id"]] = 0.0
+        else:
+            ok, out, _ = _grade_snapshot(task / "workspace", task, meta.get("grade_timeout", 300))
+            _START[meta["id"]] = _partial(ok, out)
+    return _START[meta["id"]]
+
+
+def progress(frac: float, start: float) -> float:
+    """Normalised progress: 0 = where the task started, 1 = solved (never below 0)."""
+    return 1.0 if frac >= 1.0 else max(0.0, round((frac - start) / (1.0 - start), 4)) if start < 1.0 else 0.0
+
+
 def run_task(url: str, task: Path) -> dict:
     meta = json.loads((task / "task.json").read_text())
     d = Path(tempfile.mkdtemp(prefix="gauntlet-run-"))
@@ -187,7 +226,16 @@ def run_task(url: str, task: Path) -> dict:
     budget = int(os.environ.get("GAUNTLET_TASK_TOKENS", "0") or 0)
     tb_env = int(os.environ.get("TASKEVAL_THINK_BUDGET", "0") or 0)
     integrity = {"refused": [], "removed": []}  # what the workspace tried to do to its own grade
-    for _ in range(meta.get("max_steps", 12)):
+    # GAUNTLET_TURNS=N (default 10): every task gets the same N turns (one model request each), whatever its
+    # task.json says; 0 = the task's own max_steps. The hidden tests grade a copy of the workspace after every turn
+    # that could have changed it (the model never sees that result), so a run records WHERE each model got to and the
+    # turn it first solved the task; the task ends at that turn (solved) or at the limit.
+    turns = int(os.environ.get("GAUNTLET_TURNS", "10") or 0) or meta.get("max_steps", 12)
+    per_turn = hidden_tests and answer is None and os.environ.get("GAUNTLET_PER_TURN", "1") != "0"
+    turn_timeout = min(meta.get("grade_timeout", 300), int(os.environ.get("GAUNTLET_TURN_GRADE_SECS", "120")))
+    start = start_fraction(task) if hidden_tests and answer is None else 0.0
+    curve, solved_turn, grade_secs = [], None, 0.0
+    for _ in range(turns):
         step_cap = max_tokens
         if budget:
             if budget - toks < 1024:
@@ -266,6 +314,15 @@ def run_task(url: str, task: Path) -> dict:
             else:
                 res = f"error: unknown tool {name}"
             msgs.append({"role": "tool", "tool_call_id": c["id"], "content": res})
+        if per_turn and any(c["name"] in ("write_file", "run_python") for c in calls):
+            g0 = time.time()
+            ok_t, out_t, _ = _grade_snapshot(d, task, turn_timeout)
+            grade_secs += time.time() - g0
+            curve.append([len(log), _partial(ok_t, out_t)])
+            log[-1]["hidden_fraction"] = curve[-1][1]
+            if ok_t:
+                solved_turn = len(log)
+                break
         if submitted:
             break
     if answer is not None:  # exact-answer task: the final message is the deliverable, there is nothing to run
@@ -274,15 +331,17 @@ def run_task(url: str, task: Path) -> dict:
         ok, out = False, (f"error: task {meta['id']} has no hidden test_hidden_*.py files and no 'answer' key - "
                           "nothing can grade it; refusing to report a silent pass")
     else:
-        integrity["removed"] += _strip_grading_names(d)  # plant a harness file and it is gone before it can grade
-        shutil.copytree(task / "hidden", d, dirs_exist_ok=True)
-        try:
-            ok, out = _pytest(d, True, meta.get("grade_timeout", 300))
-        except subprocess.TimeoutExpired:
-            ok, out = False, f"hidden grading exceeded its {meta.get('grade_timeout', 300)} s budget"
+        ok, out, gone = _grade_snapshot(d, task, meta.get("grade_timeout", 300))
+        integrity["removed"] += gone
     shutil.rmtree(d, ignore_errors=True)
+    part = _partial(ok, out)
+    if ok and solved_turn is None:
+        solved_turn = len(log)
     return {"id": meta["id"], "ok": ok, "submitted": submitted, "steps": len(log), "test_runs": test_runs,
-            "truncated": truncated, "partial": _partial(ok, out), "tokens": toks, "budget": budget, "secs": round(secs, 1), "integrity": integrity, "hidden_output": out[-1500:], "log": log}
+            "truncated": truncated, "partial": part, "start": start, "progress": progress(part, start),
+            "solved_turn": solved_turn, "turns": turns, "curve": curve, "grade_secs": round(grade_secs, 1),
+            "tokens": toks, "budget": budget, "secs": round(secs, 1), "integrity": integrity,
+            "hidden_output": out[-1500:], "log": log}
 
 
 def run(url, out, only):
@@ -298,15 +357,20 @@ def run(url, out, only):
                  "hidden_output": f"runner error: {e!r}", "log": []}
         res.append(r)
         print(f"{r['id']}: {'PASS' if r['ok'] else 'fail'} ({r['steps']} steps, {r['tokens']} tok, {r['secs']:.0f}s, "
-              f"partial {r.get('partial', 0):.2f}, truncated {r.get('truncated', 0)})", flush=True)
+              f"partial {r.get('partial', 0):.2f}, progress {r.get('progress', 0):.2f}, solved at turn "
+              f"{r.get('solved_turn') or '-'}, curve {[f for _, f in r.get('curve', [])]}, "
+              f"truncated {r.get('truncated', 0)})", flush=True)
     json.dump({"tasks": res, "timings": T.TIMINGS}, open(os.path.join(out, "gauntlet.json"), "w"), indent=1)
 
 
 def score(dirs):
-    # throughput (local engines; the API reports no timings): decode = generated tokens / decode time, prefill = NEW
-    # prompt tokens / prefill time (reused prefix excluded), e2e = completion tokens / wall time of every request
-    print(f"{'run':28s} {'pass':>6s} {'partial':>7s} {'trunc':>5s} {'tok':>7s} {'secs':>6s} {'decode tok/s':>13s} "
-          f"{'prefill tok/s':>13s} {'new/reused prompt':>19s} {'e2e tok/s':>9s}  passed")
+    """One row per run. SCORE = the sum over tasks of normalised progress (0 = the starting workspace, 1 = solved; a
+    solved task counts 1), so a run that gets most of the way on hard tasks outranks one that does nothing - the
+    pass count alone ties too often. turns = mean turn of first solve over the solved tasks.
+    Throughput (local engines; the API reports no timings): decode = generated tokens / decode time, prefill = NEW
+    prompt tokens / prefill time (reused prefix excluded), e2e = completion tokens / model wall time."""
+    print(f"{'run':24s} {'solved':>7s} {'SCORE':>6s} {'turns':>5s} {'trunc':>5s} {'tok':>7s} {'secs':>6s} "
+          f"{'decode':>7s} {'prefill':>8s} {'new/reused prompt':>19s} {'e2e':>6s}  per task (progress, solved@turn)")
     for d in dirs:
         g = json.load(open(os.path.join(d, "gauntlet.json")))
         ts = [t["timings"] for t in g.get("timings", []) if t.get("timings")]
@@ -314,14 +378,16 @@ def score(dirs):
         pn, pms = sum(t.get("prompt_n", 0) for t in ts), sum(t.get("prompt_ms", 0) for t in ts)
         cn = sum(t.get("cache_n", 0) for t in ts)
         rs = g["tasks"]
-        part = sum(r.get("partial", _partial(r["ok"], r.get("hidden_output", ""))) for r in rs)
+        prog = [r.get("progress", r.get("partial", _partial(r["ok"], r.get("hidden_output", "")))) for r in rs]
+        st = [r["solved_turn"] for r in rs if r.get("solved_turn")]
         tok, secs = sum(r['tokens'] for r in rs), sum(r['secs'] for r in rs)
         rate = lambda n, ms: f"{1000 * n / ms:.1f}" if ms > 0 else "-"
-        print(f"{os.path.basename(d.rstrip('/')):28s} {sum(r['ok'] for r in rs):>3d}/{len(rs):<2d} {part:>7.2f} "
-              f"{sum(r.get('truncated', -1) for r in rs) if all('truncated' in r for r in rs) else '?':>5} "
-              f"{tok:>7d} {secs:>6.0f} {rate(dn, dms):>13s} {rate(pn, pms):>13s} {f'{pn}/{cn}':>19s} "
-              f"{tok / max(secs, 1e-9):>9.1f}  {' '.join(r['id'][:2] for r in rs if r['ok'])}")
-
+        per = " ".join(f"{r['id'][:2]}:{p:.2f}{'@' + str(r['solved_turn']) if r.get('solved_turn') else ''}"
+                       for r, p in zip(rs, prog))
+        print(f"{os.path.basename(d.rstrip('/')):24s} {sum(r['ok'] for r in rs):>3d}/{len(rs):<3d} {sum(prog):>6.2f} "
+              f"{(sum(st) / len(st)) if st else 0:>5.1f} "
+              f"{sum(r.get('truncated', 0) for r in rs):>5d} {tok:>7d} {secs:>6.0f} {rate(dn, dms):>7s} "
+              f"{rate(pn, pms):>8s} {f'{pn}/{cn}':>19s} {tok / max(secs, 1e-9):>6.1f}  {per}")
 
 if __name__ == "__main__":
     if sys.argv[1] == "run":
