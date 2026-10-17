@@ -82,6 +82,29 @@
   `verify/bench/runs/api-{heplus,lcb}` (started 13:33); lcb60 for the API = the full run filtered to the subset.
   Also `out/taskeval-v2-api` (taskeval: HE all 164 + tool + agentic, reasoning passed back, `TASKEVAL_API_THINK`).
   Local runs pending: ds41 `codebench.py gen http://127.0.0.1:8161 heplus|lcb60 verify/bench/runs/ds41-...`.
+- **Research (Mal 14:10: "check Xolotl forks and other repos ... see if anyone has something we don't")**:
+  forks of Indras-Mirror/Xolotl: `vincalkr/Strata-DSV4.1` (AMD gfx1100 port; measured: ggml fused dense ops
+  dsv41-fake-quant + dsv41-fuse +13 % decode / +23 % with DSpark, GGML_CUDA_DISABLE_GRAPHS=1 +6.6 % decode on HIP,
+  arena 60->75 GiB +40 % decode on 128 GB RAM, prefill 363 tok/s on a 63K fresh prompt), `mab776/Strata-DS4` (V4-Flash
+  0731 engine, 2 GPUs; prompt-lookup drafts +42-45 % decode on edits, async hand-offs, fused hc gates, device-side
+  expert mix; a 1,733-fork survey of upstream Strata in its README.mab776.md), `cgtaotao-ctrl` (nothing new).
+  `Jackwwg83/Strata-DS` (V4.1, RTX 5090 Laptop + 64 GB: ~30 tok/s short / 24-25 at 4K-256K; SAGE 1.59 bpw quant;
+  adaptive RAM tier, 2 MiB-part reads with persistent threads, copy-engine next-layer prefetch, radix top-512 for long
+  context, and LOSSY tail skips (HumanEval+ -1.2) we do not take). Upstream Niko1221/Strata: nothing after 0.1.44.1
+  (merged). **Our build had STRATA_DSV41_HC_MIX=OFF** (= vincalkr's dsv41-fuse, bit-exact, -546 kernels/token): build-s6
+  turns it on. NVMe: we already have O_DIRECT + read_part + 32 persistent readers; the second-drive mirror was built and
+  measured dead in s12 (Strata-Backup/Strata-DS4/docs/ds4/V41_START_HERE.md: file tier not bandwidth-bound). The
+  Engram is split over the SATA Crucial SSD + NVMe (`--engram /media/Crucial1TB/...:/media/mal/SSD NVME/...`).
+- **Implemented (60f2c020, opt-in, not yet measured):** `STRATA_SERVE_KEEP_CACHE=1` (small batch turns shrink the
+  VRAM cache only by what the batch needs and refill exactly the evicted slots - the s12 notes' A2;
+  ExpertCache::admit_at) and `STRATA_SERVE_LOOKUP=L` (prompt-lookup drafts beside DSpark, mab776's design, <= 6 per
+  pass = kMaxMulti 8). GLM: no speculative decode at all (KDA recurrent state cannot rewind) - lookup drafts there
+  need a KDA snapshot/restore per verify pass: separate project.
+- **GPU window (verify/s6/window.sh, after the ds41/q27 Gauntlet):** build-s6 (HC-mix ON) during q27 ->
+  `verify/s6/glm-oom.sh` (BASE / NOGRAPH / CAPN arms: warm 8K, fresh ~30K, ~45K) -> `verify/s6/ds41-improve.sh`
+  (H0 HC off, H1 HC on, G1 graphs off, K1 keep-cache, KC keep-cache byte checks, L1 lookup; throughput, editprobe =
+  greedy rewrite-a-file turn whose text must be identical across arms, turnbench). Then start
+  `verify/s6/ds41-bench.sh` (LCB60-agent, LCB60, taskeval tool+agent) with the winning build/env.
 - `verify/s6/badcalls.py <run dirs>` counts malformed tool calls in Gauntlet runs (reproduces s5: GLM served 3/27 bad,
   exact 0/39).
 
