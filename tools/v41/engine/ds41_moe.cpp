@@ -563,6 +563,7 @@ struct Ds41MoeImpl {
     std::unique_ptr<ChunkStage> cstage;   ///< chunk_prefetch: the two pinned slabs
 #endif
     std::unique_ptr<Rebal> rebal;         ///< STRATA_ARENA_REBAL (null = off)
+    std::vector<std::array<int32_t, 3>> shrunk;   ///< shrink_cache_for: (slot, layer, expert) evicted, for regrow_cache
 };
 
 void rebal_count(Ds41MoeImpl& im, int64_t layer, const int32_t* ids, int64_t n);   // defined with rebalance_*
@@ -1636,6 +1637,7 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
         }
         if (!sizes.empty()) {
             im_->gpu->cache.reset(new strata::core::ExpertCache());
+            if (keep_cache_mode()) im_->gpu->cache->set_segment_bytes((int64_t) 64 << 20);   // shrink_cache_for
             if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
         }
     }
@@ -1644,6 +1646,7 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
         im_->cfg.slots > 0) {
         std::vector<int64_t> sizes((size_t) im_->cfg.slots, im_->blob);
         im_->gpu->cache.reset(new strata::core::ExpertCache());
+        if (keep_cache_mode()) im_->gpu->cache->set_segment_bytes((int64_t) 64 << 20);
         if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
     }
     if (!im_->gpu || !im_->gpu->cache) return true;   // no cache: nothing to seed
@@ -4581,6 +4584,100 @@ void Ds41MoeTier::release_cache() {
     im_->admitted = 0;
     im_->pf_n = 0;             // staged prefetches are keyed by expert, not slot - but they belong to the old decode
     im_->vlast.clear();        // the LRU order restarts from the next seed (lru_seed_order)
+#endif
+}
+
+bool Ds41MoeTier::keep_cache_mode() {
+    static const bool on = std::getenv("STRATA_SERVE_KEEP_CACHE") && std::getenv("STRATA_SERVE_KEEP_CACHE")[0] == '1';
+    return on;
+}
+
+int64_t Ds41MoeTier::shrink_cache_for(int64_t need_bytes, std::string& err) {
+#if defined(DS4_MOE_CUDA)
+    if (!im_->gpu || !im_->gpu->cache || !im_->gpu->cache->segmented() || im_->cfg.vram_lru) return -1;
+    if (!im_->shrunk.empty()) return -1;   // one shrink at a time (regrow_cache first)
+    strata::core::ExpertCache& c = *im_->gpu->cache;
+    if (cudaDeviceSynchronize() != cudaSuccess) { err = "shrink_cache_for: device failed"; return -1; }
+    size_t fr = 0, tot = 0;
+    if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) { err = "shrink_cache_for: cudaMemGetInfo failed"; return -1; }
+    const int64_t deficit = need_bytes - (int64_t) fr;
+    if (deficit <= 0) return 0;
+    const int64_t keep_bytes = c.bytes() - deficit;
+    if (keep_bytes <= 0) return -1;   // the whole cache would go: release_cache is the same thing, done properly
+    const int64_t keep = c.slots_within(keep_bytes);
+    const int64_t NX = im_->g.n_experts;
+    std::vector<std::array<int32_t, 3>> gone;
+    for (int64_t l = 0; l < im_->g.n_layers; ++l)
+        for (int64_t e = 0; e < NX; ++e) {
+            const int32_t sl = c.slot_of(l, e);
+            if (sl >= keep) gone.push_back({sl, (int32_t) l, (int32_t) e});
+        }
+    std::sort(gone.begin(), gone.end());
+    const int64_t n = c.evict_from(keep);
+    if (!c.shrink(c.bytes_of(keep), err)) return -1;
+    im_->admitted = im_->admitted > n ? im_->admitted - n : 0;
+    im_->pf_n = 0;   // staged prefetches may point at evicted experts' slots
+    im_->shrunk = std::move(gone);
+    return n;
+#else
+    (void) need_bytes; (void) err;
+    return -1;
+#endif
+}
+
+int64_t Ds41MoeTier::regrow_cache(std::string& err) {
+#if defined(DS4_MOE_CUDA)
+    if (im_->shrunk.empty() || !im_->gpu || !im_->gpu->cache) { im_->shrunk.clear(); return 0; }
+    strata::core::ExpertCache& c = *im_->gpu->cache;
+    const double t0 = now_ms();
+    std::string ge;
+    if (!c.grow(c.full_bytes(), ge)) { err = "regrow_cache: grow: " + ge; im_->shrunk.clear(); return -1; }
+    std::vector<std::array<int64_t, 3>> fjobs;   // slot, layer, expert (not in the arena: read from the file)
+    int64_t added = 0;
+    for (const auto& j : im_->shrunk) {
+        if (j[0] >= c.slots()) break;   // a short grow (VRAM taken meanwhile): the rest stay out
+        if (c.admit_at(j[1], j[2], j[0]) < 0) continue;   // re-admitted elsewhere meanwhile - leave the slot empty
+        const int64_t BL = im_->bl[(size_t) im_->g.cls(j[1], j[2])];
+        if (const uint8_t* p = im_->gpu->arena.ptr(j[1], j[2])) {
+            if (!c.fill_slot_queued(j[0], p, err, BL)) { im_->shrunk.clear(); return -1; }
+        } else {
+            fjobs.push_back({j[0], j[1], j[2]});
+        }
+        ++added;
+    }
+    uint8_t* buf = nullptr;
+    if (!fjobs.empty() && cudaMallocHost((void**) &buf, (size_t) im_->blob) != cudaSuccess) {
+        err = "regrow_cache: pinned buffer"; im_->shrunk.clear(); return -1;
+    }
+    for (const auto& j : fjobs) {   // few: the evicted tail is mostly arena-resident (arena_skip_resident aside)
+        im_->blobs->read(j[1], j[2], buf);
+        if (!c.fill_slot_blocking((int32_t) j[0], buf, err, im_->bl[(size_t) im_->g.cls(j[1], j[2])])) {
+            cudaFreeHost(buf); im_->shrunk.clear(); return -1;
+        }
+    }
+    if (buf) cudaFreeHost(buf);
+    if (cudaStreamSynchronize((cudaStream_t) 0) != cudaSuccess) { err = "regrow_cache: queued fills failed"; im_->shrunk.clear(); return -1; }
+    static const bool check = std::getenv("DS41_CHECK_ARENA") != nullptr;
+    if (check) {   // every refilled slot against the file, byte for byte
+        std::vector<uint8_t> ref((size_t) im_->blob), got((size_t) im_->blob);
+        int64_t bad = 0, n = 0;
+        for (const auto& j : im_->shrunk) {
+            if (c.slot_of(j[1], j[2]) != j[0]) continue;
+            const size_t len = (size_t) im_->bl[(size_t) im_->g.cls(j[1], j[2])];
+            im_->blobs->read(j[1], j[2], ref.data());
+            cudaMemcpy(got.data(), c.device_slot(j[0]), len, cudaMemcpyDeviceToHost);
+            ++n; bad += std::memcmp(got.data(), ref.data(), len) != 0;
+        }
+        std::fprintf(stderr, "[keep-chk] %lld refilled slots checked, %lld bad\n", (long long) n, (long long) bad);
+    }
+    im_->admitted += added;
+    std::fprintf(stderr, "serve: cache regrown: %lld experts back (%zu from the file) in %.0f ms\n", (long long) added,
+                 fjobs.size(), now_ms() - t0);
+    im_->shrunk.clear();
+    return added;
+#else
+    (void) err;
+    return 0;
 #endif
 }
 

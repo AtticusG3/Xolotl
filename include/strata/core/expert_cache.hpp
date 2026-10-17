@@ -147,6 +147,11 @@ public:
     /// full - **it never evicts**, because eviction policy is a measured question (`R4.1`'s LFU-decay vs LRU
     /// sweep) and a placeholder policy would set the hit rate that everything downstream is then sized against.
     int32_t admit(int64_t layer, int64_t expert);
+    /// Xolotl s6: put `expert` into a SPECIFIC free slot (one `evict_from` emptied) - how a shrunk cache gets the
+    /// experts it evicted back into exactly the slots they had (a sized cache's slot fits only its own blob class).
+    /// Not on the per-layer path.  Returns the slot, or kNotResident when the slot is out of range / taken / the
+    /// expert is already resident elsewhere.
+    int32_t admit_at(int64_t layer, int64_t expert, int32_t slot);
 
     /// Publish a same-layer replacement after its slot copy has completed.
     void replace(int64_t layer, int32_t old_expert, int32_t new_expert) {

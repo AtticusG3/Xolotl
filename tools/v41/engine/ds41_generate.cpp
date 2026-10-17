@@ -1231,9 +1231,30 @@ int main(int argc, char ** argv) {
                 bias_now = a.bias_prompt > 0;
                 apply_bias();
             }
+            // STRATA_SERVE_KEEP_CACHE=1 (s6, opt-in until measured): a batch turn of at most STRATA_SERVE_KEEP_MAX new
+            // tokens (default 4096) gives back only the VRAM its batch needs (the calibrated need(B) below) - the cache's
+            // lowest-ranked tail - instead of the whole cache, so the hot experts serve the batch from VRAM (no PCIe) and
+            // the decode after it skips the re-seed (regrow_cache refills just the tail).  The prompt still routes exactly.
+            bool kept = false;
             if (!by_step && defer_vram && cache_open && dh >= 2) {
-                tier.release_cache();
-                cache_open = false;
+                static const int keep_max = std::getenv("STRATA_SERVE_KEEP_MAX") ? std::atoi(std::getenv("STRATA_SERVE_KEEP_MAX")) : 4096;
+                if (Ds41MoeTier::keep_cache_mode() && dh <= keep_max && !mc.cpu_only) {
+                    const double need = (4.3 * 1073741824.0 + 0.95 * 1048576.0 * (double) std::min(dh, PB)) +
+                                        a.vram_margin_gib * 1073741824.0;
+                    std::string kerr;
+                    const int64_t g = tier.shrink_cache_for((int64_t) need, kerr);
+                    if (g >= 0) {
+                        kept = true;
+                        std::fprintf(stderr, "serve: cache kept for a %d-token batch (%lld tail slots out, %lld experts stay)\n",
+                                     dh, (long long) g, (long long) tier.resident());
+                    } else if (!kerr.empty()) {
+                        std::fprintf(stderr, "serve: keep-cache: %s - releasing the cache\n", kerr.c_str());
+                    }
+                }
+                if (!kept) {
+                    tier.release_cache();
+                    cache_open = false;
+                }
                 bias_now = a.bias_prompt > 0;
                 apply_bias();
             }
@@ -1301,6 +1322,18 @@ int main(int argc, char ** argv) {
             if (bcap > 0) bcap_vh.assign((size_t) bcap * 3 * n_embd, 0.0f);
             bool ok = total == reused || dh == 0 || (by_step ? feed_steps() : feed(ids.data() + reused, dh, reused, pp, nullptr));
             bcap_n = 0;
+            if (kept) {   // the batch is done: the tail slots back (exactly the evicted experts), decode biases on
+                std::string kerr;
+                dense.release_pass();   // the batch's pass buffers first (open_cache does the same before a seed)
+                if (tier.regrow_cache(kerr) < 0) {
+                    std::fprintf(stderr, "serve: keep-cache regrow: %s - re-seeding\n", kerr.c_str());
+                    tier.release_cache();
+                    cache_open = false;
+                } else {
+                    bias_now = true;
+                    apply_bias();
+                }
+            }
             double ph_feed = now_ms() - tph0, ph_open = 0, ph_tail = 0;   // the request's prompt phases (stderr)
             int sp_t = -1;   // DSpark: the first decode token (sampled from the last prompt row), its drafts in sp_ids
             int sp_ids[5] = {0}, sp_tmp[5];
@@ -1415,6 +1448,20 @@ int main(int argc, char ** argv) {
                 bool dirty = false;
                 std::vector<int> vt;
                 std::vector<std::pair<int, double>> dist;
+                // STRATA_SERVE_LOOKUP=L (s6, opt-in until measured; mab776/Strata-DS4 M11's design): when the context's
+                // last G+1 tokens (STRATA_LOOKUP_NGRAM=G, default 3) occurred earlier in this request (prompt + output),
+                // the tokens that followed them there are the verify pass's drafts instead of DSpark's - an agent's output
+                // copies its context (edits, rewrites, quoted tool results).  spec_accept treats every draft as a
+                // deterministic token (accept with p, else resample without it), so the output distribution is unchanged.
+                // A match of M tokens drafts M - G + 1 (<= L, <= the pass width).  STRATA_LOOKUP_AGREE (default 1): only
+                // when the copy's first token is DSpark's own first draft.  A lookup pass with less than half accepted
+                // sits the lookup out 1, 2, 4 .. 64 passes.  DSpark steps on the verified rows either way.
+                static const int lk_max = std::getenv("STRATA_SERVE_LOOKUP") ? std::max(0, std::min(Ds41MoeTier::kMaxMulti - 2, std::atoi(std::getenv("STRATA_SERVE_LOOKUP")))) : 0;
+                static const int lk_g = std::getenv("STRATA_LOOKUP_NGRAM") ? std::max(1, std::atoi(std::getenv("STRATA_LOOKUP_NGRAM"))) : 3;
+                static const bool lk_agree = !(std::getenv("STRATA_LOOKUP_AGREE") && std::getenv("STRATA_LOOKUP_AGREE")[0] == '0');
+                int lk_cool = 0, lk_back = 1;
+                long lk_pass = 0, lk_dr = 0, lk_acc = 0;
+                int dr[Ds41MoeTier::kMaxMulti] = {0};
                 auto emit = [&](int tok) -> bool {   // false = stop here
                     std::printf("T %d\n", tok);
                     std::fflush(stdout);
@@ -1438,22 +1485,55 @@ int main(int argc, char ** argv) {
                         k = kk;
                     }
                     const bool refeed = dirty && ((P + 1) & 1);
+                    for (int i = 0; i < k; ++i) dr[i] = sp_ids[i];
+                    bool is_lk = false;
+                    if (lk_max > 0 && lk_cool > 0) --lk_cool;
+                    else if (lk_max > 0) {
+                        // the sequence is hist + t (t = the token for P+1, not in hist yet); find the latest earlier q with
+                        // seq[q-G .. q] == seq[n-G .. n] (G+1 tokens, the last being t), then copy seq[q+1 ..]
+                        const int n = (int) hist.size();
+                        auto sq = [&](int i) { return i == n ? t : hist[(size_t) i]; };
+                        int cap = std::min(lk_max, Ds41MoeTier::kMaxMulti - 1 - (refeed ? 1 : 0));
+                        if (max_new > 0) cap = std::min(cap, max_new - gen);
+                        cap = std::min(cap, ctxv - (P + 3));
+                        if (cap >= 2 && n > lk_g + 1) {
+                            for (int q = n - 1; q >= lk_g; --q) {
+                                if (hist[(size_t) q] != t) continue;
+                                int m = 1;
+                                while (m < 64 && q - m >= 0 && hist[(size_t) (q - m)] == sq(n - m)) ++m;
+                                if (m < lk_g + 1) continue;
+                                const int L = std::min({cap, m - lk_g + 1, n - q});
+                                if (L < 2) break;   // the latest match copies too little: not worth a pass
+                                if (lk_agree && sq(q + 1) != sp_ids[0]) break;
+                                for (int i = 0; i < L; ++i) dr[i] = sq(q + 1 + i);
+                                k = L;
+                                is_lk = true;
+                                break;
+                            }
+                        }
+                    }
                     vt.clear();
                     if (refeed) vt.push_back(prev);
                     vt.push_back(t);
-                    for (int i = 0; i < k; ++i) vt.push_back(sp_ids[i]);
+                    for (int i = 0; i < k; ++i) vt.push_back(dr[i]);
                     const int r0 = refeed ? 1 : 0, p0 = refeed ? P : P + 1;
                     if (!pass_v(vt.data(), (int) vt.size(), p0)) { finish = "error"; break; }
                     int acc = 0, tn = -1;
                     for (; acc < k; ++acc) {
                         sample_dist(vlog.data() + (size_t) (r0 + acc) * nv, nv, temp, tk, top_p, min_p, dist);
-                        if (!spec_accept(dist, sp_ids[acc], rng, tn)) break;
+                        if (!spec_accept(dist, dr[acc], rng, tn)) break;
                     }
                     if (acc == k) tn = sample_p(vlog.data() + (size_t) (r0 + k) * nv, nv, temp, tk, top_p, min_p, rng);
                     ++rq_pass; rq_acc += acc;
-                    int spos[6];
+                    if (is_lk) {
+                        ++lk_pass; lk_dr += k; lk_acc += acc;
+                        if (2 * acc < k) { lk_cool = lk_back; lk_back = std::min(64, lk_back * 2); }
+                        else lk_back = 1;
+                    }
+                    int spos[Ds41MoeTier::kMaxMulti + 1];
                     for (int i = 0; i <= acc; ++i) spos[i] = P + 1 + i;
-                    const int drafts[5] = { sp_ids[0], sp_ids[1], sp_ids[2], sp_ids[3], sp_ids[4] };
+                    int drafts[Ds41MoeTier::kMaxMulti];
+                    for (int i = 0; i < k; ++i) drafts[i] = dr[i];
                     if (!dsp->step(vh.data() + (size_t) r0 * 3 * n_embd, spos, acc + 1, tn, sp_ids, sp_conf)) {
                         ferr = "DSpark step: " + dsp->last_error(); finish = "error"; break;
                     }
@@ -1467,6 +1547,8 @@ int main(int argc, char ** argv) {
                     tier.rebalance_tick();
                     if (!more) break;
                 }
+                if (lk_pass > 0)
+                    std::fprintf(stderr, "serve: lookup %ld/%ld drafts accepted in %ld passes\n", lk_acc, lk_dr, lk_pass);
                 dsp_next = P + 1;   // the ring holds every position <= P (the last emitted token is not fed)
                 if (std::strcmp(finish, "error") == 0) dsp_next = -1;
                 sv_pass += rq_pass; sv_acc += rq_acc;
