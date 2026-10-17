@@ -58,6 +58,30 @@
   same calls as exact routing in s5); **e2e HumanEval 19/21, tool 10/10, agentic 3/3, decode 25.3 tok/s** (101,269
   tokens, 4,263 s). Fails: HE/32 (find_zero, wrong answer after 25.8K tokens), HE/160 (hit the 33,792 ceiling).
   Exact routing was not run on those two (~1 h each at 10 tok/s).
+- **Arena, gapped schedule** (`verify/s6/rebal/tb6.log`, turnbench 4K + 8 turns, 20 s gaps): small-turn prefill mean
+  off 9.06 s, new default 8.13 s (-10 %, = s5's -10 %), with decode reads 7.81 s; file-tier reads per small turn
+  -21..-29 %. Default kept (decode reads cost back-to-back decode 5-19 %).
+- **GLM throughput (bias 0.25)**: prefill 301 / 374 tok/s at 6.1K / 15.6K fresh, decode 22.7 / 21.7 tok/s after them.
+- **GLM BUG: CUDA OOM on a fresh ~30K-token re-prefill** (`verify/s6/glm-bias025/engine.log` lines ~300-357, twice):
+  after a ~28K-token thinking turn the next request loses prefix reuse (hist=0, lcp ~4.5K) and re-prefills 30-33K
+  tokens; `shrink_cache` frees the same ~650 slots as for a 17-token prompt, `safe_chunk` keeps 4096 at cap 32768
+  (product 134M < its 268M limit), and `cudaGraphInstantiate` fails (exit 134; the server restarts the engine, the
+  Gauntlet task is lost). A 15.6K fresh prompt works. Suspect: per-shape CUDA graphs accumulating over a long
+  conversation, or the s28 limit calibrated at a different VRAM state. **The GLM Gauntlet run was stopped (invalid:
+  01/02 lost to the crash)**. Repro: serve the bias config, run a long conversation, then a fresh 30K prompt
+  (`tools/throughput.py --prompt 38000`). Not fixed yet.
+- **Mal asked (13:30) for a full DeepSeek quant vs API benchmark on STANDARD coding benchmarks** (not only ours):
+  `verify/bench/codebench.py` (venv `verify/bench/.venv`: evalplus 0.3.1, datasets; LiveCodeBench repo clone
+  `verify/bench/lcb`, data `verify/bench/lcb_data/test6.jsonl`): **EvalPlus HumanEval+ (164)** with evalplus's
+  instruction prompt + `evalplus.evaluate` (canonical solutions score 163/164 - HE/32 find_zero's reference fails a
+  plus input under evalplus's tolerance, the same for every run), **LiveCodeBench v6 (175, 2025-01..04)** with LCB's
+  generic prompt (copied verbatim - its prompts package needs an old anthropic SDK) + LCB's own extractor/grader
+  (negative-tested: wrong / empty answers score 0), and **lcb60** = fixed stratified 20/20/20 subset
+  (`lcb_subset60.json`, random.Random(0)) for the local engine (the full 175 at 25 tok/s would be ~20 h). Greedy,
+  pass@1; thinking total 32K + 4096 answer on both sides (local `reasoning_budget_tokens`, API max_tokens). API runs
+  `verify/bench/runs/api-{heplus,lcb}` (started 13:33); lcb60 for the API = the full run filtered to the subset.
+  Also `out/taskeval-v2-api` (taskeval: HE all 164 + tool + agentic, reasoning passed back, `TASKEVAL_API_THINK`).
+  Local runs pending: ds41 `codebench.py gen http://127.0.0.1:8161 heplus|lcb60 verify/bench/runs/ds41-...`.
 - `verify/s6/badcalls.py <run dirs>` counts malformed tool calls in Gauntlet runs (reproduces s5: GLM served 3/27 bad,
   exact 0/39).
 

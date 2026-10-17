@@ -34,6 +34,11 @@ def chat(url, messages, tools=None, max_tokens=1024):
         body.pop("reasoning_effort", None)
         body["reasoning_budget_tokens"] = tb
         body["max_tokens"] = max_tokens + tb
+    # TASKEVAL_API_THINK=N: a remote thinking API (DeepSeek) has no thinking budget and its max_tokens covers the chain
+    # of thought too, so the answer cap would cut it off: max_tokens = answer cap + N (the local engines' 32K + answer)
+    at = int(os.environ.get("TASKEVAL_API_THINK", "0") or 0)
+    if at > 0:
+        body["max_tokens"] = max_tokens + at
     if tools:
         body["tools"] = tools
     # TASKEVAL_KEY: Bearer token for a remote OpenAI-compatible endpoint (the local engines need none)
@@ -196,7 +201,11 @@ def agent_loop(url, case, max_steps=8):
         log.append({"content": m.get("content"), "calls": calls})
         if not calls:
             break
-        msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": m["tool_calls"]})
+        # reasoning_content goes back with the turn (DeepSeek's thinking-mode tool-call protocol requires it; the
+        # Gauntlet does the same) - TASKEVAL_DROP_REASONING=1 = the old behaviour
+        keep = {"reasoning_content": m["reasoning_content"]} if m.get("reasoning_content") and \
+            os.environ.get("TASKEVAL_DROP_REASONING") != "1" else {}
+        msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": m["tool_calls"], **keep})
         for c in calls:
             a = c["args"]
             if c["name"] == "read_file":
@@ -219,7 +228,8 @@ def agent_loop(url, case, max_steps=8):
 
 def he_cases():
     df = pd.read_parquet(os.path.join(HERE, "he/openai_humaneval/test-00000-of-00001.parquet"))
-    return [df.iloc[i] for i in range(0, len(df), 8)]
+    # TASKEVAL_HE_ALL=1: all 164 problems (the default every-8th subset of 21 is saturated by every Xolotl model)
+    return [df.iloc[i] for i in range(0, len(df), 1 if os.environ.get("TASKEVAL_HE_ALL") == "1" else 8)]
 
 
 def extract_code(text):
