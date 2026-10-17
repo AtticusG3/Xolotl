@@ -107,6 +107,29 @@
   `verify/s6/ds41-bench.sh` (LCB60-agent, LCB60, taskeval tool+agent) with the winning build/env.
 - `verify/s6/badcalls.py <run dirs>` counts malformed tool calls in Gauntlet runs (reproduces s5: GLM served 3/27 bad,
   exact 0/39).
+- **Gauntlet v2 final** (`verify/e2e/gauntlet-v2/score.txt`): API 5/7 6.41 | ds41 4/7 6.20 (23.4 tok/s) | q27 4/7 5.41 |
+  qflash 5/7 5.50. ds41 and the API trade tasks (API solved 01/07, ds41 06). `gauntlet.py` (d71d95bd): a failed model
+  request now ends the task where it got to (`chat_error`) - q27 had lost 14 to a 200K-context overflow.
+- **GLM OOM FIXED** (96f93962): CUDA graphs off for big batches only - `GGML_CUDA_GRAPH_MAX_TOKENS` (ggml-cuda patch
+  `tools/v41/ggml/cuda-graph-max-tokens.patch`, also in the public `tools/xolotl/ggml/xolotl-ggml.patch`), 64 in
+  `glm-engine.sh`. `verify/s6/glm-oom.sh`: BASE / CAPN OOM on 30K / 44K fresh; NOGRAPH ok but decode 16.9-18.4;
+  FIX ok, prefill 292 / 368 / 376, decode 19.5-21.7.
+- **ds41 improvements** (dee2af6c; `verify/s6/improve*/`, editprobe text identical to H1 in every arm):
+  HC-mix ON +3-5 % decode; graphs off slower; **DSpark re-seed on a repeated prompt** (delta 0 used to leave sp_t=-1,
+  no DSpark at all) 21.9 -> 32.0; **lookup 14** (kVerify 16) 35.9 edit decode, 1040/1077 accepted; **DSPARK_EVICT
+  4096** 16.8K prefill 263 -> 314. Both lookup 14 + evict are defaults in `ds41-engine.sh`. Keep-cache: never engages
+  under the default `--vram-lru` (`shrink_cache_for` now logs why) - making it work with vram_lru is the next job.
+  The P1 profile printed nothing (the profilers print at engine close / one-shot only).
+  **build-xolotl rebuilt with HC_MIX=ON** (19:10); served-default check S1 (`verify/s6/improve3.log`): edit 36.6 tok/s,
+  text identical; thr prefill 188 / 318, decode 22.6 / 21.6 (below D1's 26.0 / 24.4 an hour earlier - noise or heat,
+  watch it).
+- **LiveCodeBench quant vs API** (`verify/s6/ds41-lcb15.sh`, 15 lcb60 problems, paired with the paid `runs/api-lcb60`,
+  no new API spend). One hour, 32K budget (27.6K thinking cap): only 3 done - local 3/3 (abc398_f hard which the API
+  failed, 3751, abc395_e) vs API 2/3, but **local thinks 3-12x longer** (6.5-27.8K vs 2.1-2.4K tokens; 3 of the 4
+  started hit the cap). Gauntlet tokens are equal (105K vs 107K), so it is one-shot reasoning only. The API's two misses
+  in the 15 stopped on their own (not cut off); its 3 length-capped lcb60 problems are outside the 15. Mal (19:15):
+  run the rest with full thinking -> `verify/s6/lcb15-full.log` (build-xolotl, CB_THINK=98304, no deadline, resumable:
+  done ids are skipped). HF card updated (commit 6992cf5e, "Against the DeepSeek API").
 
 # Xolotl — HANDOFF (2026-10-17, session 5 — history)
 **RESUME = the "START HERE" block at the top of `RESUME_PROMPT.md`** (written at the end of session 5, ~08:20). It
