@@ -235,21 +235,29 @@ def run_task(url: str, task: Path) -> dict:
     turn_timeout = min(meta.get("grade_timeout", 300), int(os.environ.get("GAUNTLET_TURN_GRADE_SECS", "120")))
     start = start_fraction(task) if hidden_tests and answer is None else 0.0
     curve, solved_turn, grade_secs = [], None, 0.0
+    chat_error = None
     for _ in range(turns):
         step_cap = max_tokens
         if budget:
             if budget - toks < 1024:
                 break
             step_cap = min(max_tokens, budget - toks)
-        if tb_env:  # chat() adds the thinking budget on top of the answer's: split this step's cap between them
-            ans_cap = min(4096, step_cap // 2)   # NOT `answer`: that is the exact-answer task's pattern (graded below)
-            os.environ["TASKEVAL_THINK_BUDGET"] = str(max(256, min(tb_env, step_cap - ans_cap)))
-            try:
-                j = T.chat(url, msgs, TOOLS, max_tokens=ans_cap)
-            finally:
-                os.environ["TASKEVAL_THINK_BUDGET"] = str(tb_env)
-        else:
-            j = T.chat(url, msgs, TOOLS, max_tokens=step_cap)
+        # a failed request (s6: q27's conversation ran past its 200K context on turn 8) ends the task where it got
+        # to - the workspace is still graded below - instead of discarding the whole task as a runner error
+        try:
+            if tb_env:  # chat() adds the thinking budget on top of the answer's: split this step's cap between them
+                ans_cap = min(4096, step_cap // 2)   # NOT `answer`: that is the exact-answer task's pattern (graded below)
+                os.environ["TASKEVAL_THINK_BUDGET"] = str(max(256, min(tb_env, step_cap - ans_cap)))
+                try:
+                    j = T.chat(url, msgs, TOOLS, max_tokens=ans_cap)
+                finally:
+                    os.environ["TASKEVAL_THINK_BUDGET"] = str(tb_env)
+            else:
+                j = T.chat(url, msgs, TOOLS, max_tokens=step_cap)
+        except Exception as e:
+            chat_error = f"turn {len(log) + 1}: {e!r}"[:300]
+            print(f"  [{meta['id'][:2]} step {len(log) + 1:2d}] request failed: {chat_error}", flush=True)
+            break
         toks += j.get("usage", {}).get("completion_tokens", 0)
         secs += j["_secs"]
         m = j["choices"][0]["message"]
@@ -341,7 +349,7 @@ def run_task(url: str, task: Path) -> dict:
             "truncated": truncated, "partial": part, "start": start, "progress": progress(part, start),
             "solved_turn": solved_turn, "turns": turns, "curve": curve, "grade_secs": round(grade_secs, 1),
             "tokens": toks, "budget": budget, "secs": round(secs, 1), "integrity": integrity,
-            "hidden_output": out[-1500:], "log": log}
+            "hidden_output": out[-1500:], "log": log, "chat_error": chat_error}
 
 
 def run(url, out, only):
