@@ -9,6 +9,9 @@ if [ "${MEMGUARD_ALLOW_COMFY:-0}" != 1 ] && ss -ltn 2>/dev/null | grep -q ':8188
 fi
 LOCK="${DS4_LOCK:-$HOME/.quetza-data/conductor/ds4-gpu.lock}"
 export GGML_NO_BACKTRACE=1
+# s6: prompt chunks run without CUDA graphs (instantiating a chunk's graph ran out of VRAM on fresh ~30K prompts);
+# decode keeps them (graphs off everywhere fixed the crash but cost ~17% decode). =0 restores graphs everywhere.
+export GGML_CUDA_GRAPH_MAX_TOKENS="${GGML_CUDA_GRAPH_MAX_TOKENS:-64}"
 # xolotl: the unified tree builds every engine into build-xolotl; STRATA_BUILD_DIR overrides it, and the
 # pre-merge build dir (build-glm-gpu) is still found so an old checkout of this script keeps working
 BUILD_DIR="${STRATA_BUILD_DIR:-$PWD/build-xolotl}"
