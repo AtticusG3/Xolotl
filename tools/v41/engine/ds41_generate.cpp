@@ -1051,6 +1051,11 @@ int main(int argc, char ** argv) {
         std::vector<int> hist;
         int snap_len = -1;
         std::vector<float> snap_logits;   // the last prompt row's logits at the snapshot (a repeated prompt samples from them)
+        // s6: DSpark's seed rows (main_hidden) of the snapshot's prompt tail - a repeated prompt (regenerate / a client
+        // retry) feeds no new tokens, so without them DSpark had nothing to seed from and the whole answer decoded
+        // without drafts (measured: 21.9 vs 31.8 tok/s on the same 1200-token edit).  cur_seed = this prompt's tail.
+        std::vector<float> snap_seed, cur_seed;
+        int snap_seed_n = 0, cur_seed_n = 0;
         int n_req = 0;
         // STRATA_SERVE_PARK (default on): an agent harness sends short UNRELATED requests between the turns of its main
         // conversation (titles, summaries).  Each wrote its own positions from 0 over the main conversation's caches, so
@@ -1149,6 +1154,7 @@ int main(int argc, char ** argv) {
                     hist = park_hist;
                     snap_len = (int) park_hist.size();
                     snap_logits = park_logits;
+                    snap_seed_n = 0;
                     lcp = lp;
                     unparked = true;   // the live rings are the side request's: resume through restore()
 #if defined(DS41_HAVE_DSPARK)
@@ -1160,12 +1166,14 @@ int main(int argc, char ** argv) {
                 }
             }
             int reused = 0;
+            bool regen = false;   // the snapshot's own prompt again: nothing new to feed
             if (reuse_override >= 0) reused = reuse_override;   // a partial unpark: positions [0, lp) are the parked one's
             else if (!unparked && !hist.empty() && lcp == hist.size() && lcp < ids.size()) reused = (int) lcp;
             else if (snap_len > 0 && lcp >= (size_t) snap_len && (size_t) snap_len == ids.size() && dense.restore()) {
                 hist.resize((size_t) snap_len);   // the same prompt again (regenerate): its end state + saved logits
                 reused = snap_len;
                 last_logits = snap_logits;
+                regen = true;
             } else if (snap_len > 0 && lcp >= (size_t) snap_len && (size_t) snap_len < ids.size() && dense.restore()) {
                 hist.resize((size_t) snap_len);
                 reused = snap_len;
@@ -1235,7 +1243,12 @@ int main(int argc, char ** argv) {
             // tokens (default 4096) gives back only the VRAM its batch needs (the calibrated need(B) below) - the cache's
             // lowest-ranked tail - instead of the whole cache, so the hot experts serve the batch from VRAM (no PCIe) and
             // the decode after it skips the re-seed (regrow_cache refills just the tail).  The prompt still routes exactly.
+            // s6 A/B: it never engages with the default --vram-lru (the LRU reorders slots, so "the tail" is not the
+            // coldest experts and a batch-time admission could duplicate a saved one) - it needs --no-vram-lru for now.
             bool kept = false;
+            if (Ds41MoeTier::keep_cache_mode() && !by_step && dh >= 2 && !(defer_vram && cache_open))
+                std::fprintf(stderr, "serve: keep-cache: not applicable (deferred VRAM %d, cache open %d)\n", (int) defer_vram,
+                             (int) cache_open);
             if (!by_step && defer_vram && cache_open && dh >= 2) {
                 static const int keep_max = std::getenv("STRATA_SERVE_KEEP_MAX") ? std::atoi(std::getenv("STRATA_SERVE_KEEP_MAX")) : 4096;
                 if (Ds41MoeTier::keep_cache_mode() && dh <= keep_max && !mc.cpu_only) {
@@ -1254,6 +1267,17 @@ int main(int argc, char ** argv) {
                 if (!kept) {
                     tier.release_cache();
                     cache_open = false;
+#if defined(DS41_HAVE_DSPARK)
+                    // STRATA_SERVE_DSPARK_EVICT=N (s6, opt-in until measured; 0 = off): a batch of >= N new tokens also
+                    // frees DSpark's ~2.9 GB of weights for its duration - the prompt batch is sized from free VRAM
+                    // (s6: 8731 columns before DSpark loads, 5434 after), so a long prompt takes fewer expert sweeps.
+                    // open_cache() re-creates it for the tail (~1-4 s); the window is re-seeded by the tail as always.
+                    static const int dsp_evict = std::getenv("STRATA_SERVE_DSPARK_EVICT") ? std::atoi(std::getenv("STRATA_SERVE_DSPARK_EVICT")) : 0;
+                    if (dsp && dsp_evict > 0 && dh >= dsp_evict) {
+                        dsp.reset();
+                        std::fprintf(stderr, "serve: DSpark weights freed for a %d-token batch\n", dh);
+                    }
+#endif
                 }
                 bias_now = a.bias_prompt > 0;
                 apply_bias();
@@ -1357,6 +1381,11 @@ int main(int argc, char ** argv) {
                         for (int t = 0; t < m; ++t) spos[(size_t) t] = i0 + t;
                         const bool last = i0 + m == total;
                         if (last) sp_t = sample_p(last_logits.data(), nv, temp, tk, top_p, min_p, rng);   // the batch's last row
+                        if (i0 == c0s) cur_seed_n = 0;
+                        cur_seed.resize((size_t) (cur_seed_n + m) * 3 * n_embd);
+                        std::copy_n(bcap_vh.data() + (size_t) (i0 - c0s) * 3 * n_embd, (size_t) m * 3 * n_embd,
+                                    cur_seed.data() + (size_t) cur_seed_n * 3 * n_embd);
+                        cur_seed_n += m;
                         if (!dsp->step(bcap_vh.data() + (size_t) (i0 - c0s) * 3 * n_embd, spos.data(), m, last ? sp_t : -1,
                                        last ? sp_ids : sp_tmp, sp_conf)) {
                             ferr = "DSpark step: " + dsp->last_error(); ok = false; break;
@@ -1374,6 +1403,10 @@ int main(int argc, char ** argv) {
                         std::copy(vlog.end() - nv, vlog.end(), last_logits.begin());
                         sp_t = sample_p(last_logits.data(), nv, temp, tk, top_p, min_p, rng);
                     }
+                    if (i0 == total - sp_tail) cur_seed_n = 0;
+                    cur_seed.resize((size_t) (cur_seed_n + m) * 3 * n_embd);
+                    std::copy_n(vh.data(), (size_t) m * 3 * n_embd, cur_seed.data() + (size_t) cur_seed_n * 3 * n_embd);
+                    cur_seed_n += m;
                     if (!dsp->step(vh.data(), spos.data(), m, last ? sp_t : -1, last ? sp_ids : sp_tmp, sp_conf)) {
                         ferr = "DSpark step: " + dsp->last_error(); ok = false; break;
                     }
@@ -1381,6 +1414,27 @@ int main(int argc, char ** argv) {
                 if (ok) { bias_now = true; apply_bias(); }
                 ph_tail = now_ms() - tt0;
                 pp(delta);
+            } else if (ok && regen && dsp && snap_seed_n > 0) {   // a repeated prompt: re-seed DSpark from the snapshot's rows
+                const double tt0 = now_ms();
+                dsp->reset();
+                std::vector<int> spos;
+                const int s0 = total - snap_seed_n;
+                for (int i0 = s0; i0 < total; i0 += 16) {
+                    const int m = std::min(16, total - i0);
+                    spos.resize((size_t) m);
+                    for (int t = 0; t < m; ++t) spos[(size_t) t] = i0 + t;
+                    const bool last = i0 + m == total;
+                    if (last) sp_t = sample_p(last_logits.data(), nv, temp, tk, top_p, min_p, rng);
+                    if (!dsp->step(snap_seed.data() + (size_t) (i0 - s0) * 3 * n_embd, spos.data(), m, last ? sp_t : -1,
+                                   last ? sp_ids : sp_tmp, sp_conf)) {
+                        std::fprintf(stderr, "serve: DSpark re-seed: %s (decoding without drafts)\n", dsp->last_error().c_str());
+                        dsp->reset();
+                        sp_t = -1;
+                        break;
+                    }
+                }
+                ph_tail = now_ms() - tt0;
+                std::fprintf(stderr, "serve: repeated prompt - DSpark re-seeded from %d saved rows (%.2f s)\n", snap_seed_n, ph_tail / 1000.0);
             }
 #endif
             dense.prof_report("turn");
@@ -1405,7 +1459,13 @@ int main(int argc, char ** argv) {
                 continue;
             }
             hist = ids;
-            if (total > reused && dense.snapshot(total)) { snap_len = total; snap_logits = last_logits; }
+            if (total > reused && dense.snapshot(total)) {
+                snap_len = total;
+                snap_logits = last_logits;
+                snap_seed.swap(cur_seed);   // this prompt's DSpark tail rows (0 rows when DSpark is off / no tail ran)
+                snap_seed_n = cur_seed_n;
+            }
+            cur_seed_n = 0;
             if (const char * dd = std::getenv("STRATA_SERVE_DUMP")) {   // exactness checks: request N's last-row logits
                 char nb[32];
                 std::snprintf(nb, sizeof(nb), "/req%03d.f32", n_req);
@@ -1456,12 +1516,16 @@ int main(int argc, char ** argv) {
                 // A match of M tokens drafts M - G + 1 (<= L, <= the pass width).  STRATA_LOOKUP_AGREE (default 1): only
                 // when the copy's first token is DSpark's own first draft.  A lookup pass with less than half accepted
                 // sits the lookup out 1, 2, 4 .. 64 passes.  DSpark steps on the verified rows either way.
-                static const int lk_max = std::getenv("STRATA_SERVE_LOOKUP") ? std::max(0, std::min(Ds41MoeTier::kMaxMulti - 2, std::atoi(std::getenv("STRATA_SERVE_LOOKUP")))) : 0;
+                // kVerify (s6): rows one verify pass may take - 16, as the prompt passes (pass_m splits the tier calls at
+                // kMaxMulti = 8 and the pass buffers hold 17).  A copy is accepted ~96% on edits, so the draft length
+                // was the limit at kMaxMulti - 2 = 6 (s6: 932/972 accepted in 169 passes, only +3% over DSpark's own).
+                constexpr int kVerify = 16;
+                static const int lk_max = std::getenv("STRATA_SERVE_LOOKUP") ? std::max(0, std::min(kVerify - 2, std::atoi(std::getenv("STRATA_SERVE_LOOKUP")))) : 0;
                 static const int lk_g = std::getenv("STRATA_LOOKUP_NGRAM") ? std::max(1, std::atoi(std::getenv("STRATA_LOOKUP_NGRAM"))) : 3;
                 static const bool lk_agree = !(std::getenv("STRATA_LOOKUP_AGREE") && std::getenv("STRATA_LOOKUP_AGREE")[0] == '0');
                 int lk_cool = 0, lk_back = 1;
                 long lk_pass = 0, lk_dr = 0, lk_acc = 0;
-                int dr[Ds41MoeTier::kMaxMulti] = {0};
+                int dr[kVerify] = {0};
                 auto emit = [&](int tok) -> bool {   // false = stop here
                     std::printf("T %d\n", tok);
                     std::fflush(stdout);
@@ -1493,7 +1557,7 @@ int main(int argc, char ** argv) {
                         // seq[q-G .. q] == seq[n-G .. n] (G+1 tokens, the last being t), then copy seq[q+1 ..]
                         const int n = (int) hist.size();
                         auto sq = [&](int i) { return i == n ? t : hist[(size_t) i]; };
-                        int cap = std::min(lk_max, Ds41MoeTier::kMaxMulti - 1 - (refeed ? 1 : 0));
+                        int cap = std::min(lk_max, kVerify - 1 - (refeed ? 1 : 0));
                         if (max_new > 0) cap = std::min(cap, max_new - gen);
                         cap = std::min(cap, ctxv - (P + 3));
                         if (cap >= 2 && n > lk_g + 1) {
@@ -1530,9 +1594,9 @@ int main(int argc, char ** argv) {
                         if (2 * acc < k) { lk_cool = lk_back; lk_back = std::min(64, lk_back * 2); }
                         else lk_back = 1;
                     }
-                    int spos[Ds41MoeTier::kMaxMulti + 1];
+                    int spos[kVerify + 1];
                     for (int i = 0; i <= acc; ++i) spos[i] = P + 1 + i;
-                    int drafts[Ds41MoeTier::kMaxMulti];
+                    int drafts[kVerify];
                     for (int i = 0; i < k; ++i) drafts[i] = dr[i];
                     if (!dsp->step(vh.data() + (size_t) r0 * 3 * n_embd, spos, acc + 1, tn, sp_ids, sp_conf)) {
                         ferr = "DSpark step: " + dsp->last_error(); finish = "error"; break;

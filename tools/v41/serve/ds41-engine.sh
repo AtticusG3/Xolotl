@@ -26,6 +26,12 @@ export STRATA_SERVE_DSPARK="${STRATA_SERVE_DSPARK-$DSPARK_SIDECAR}"
 export STRATA_DSPARK_KEEP="${STRATA_DSPARK_KEEP:-$PWD/tools/v41/serve/dspark_expert_counts.txt:64}"
 export STRATA_DSPARK_DEPTH="${STRATA_DSPARK_DEPTH:-4}"
 export STRATA_DSPARK_CONF="${STRATA_DSPARK_CONF:-0.6}"
+# s6 (2026-10-17, verify/s6/improve2): prompt-lookup drafts of up to 14 tokens in the DSpark loop - a copy of the
+# context (edits, rewrites) verified like any draft, so the output is the same (greedy edit text identical; 1040/1077
+# drafts accepted, edit decode 32.0 -> 35.9 tok/s).  And DSpark's 2.9 GB of weights leave the card during a batch of
+# >= 4096 new tokens, so the prompt batch is wider (16.8K fresh prompt: 263 -> 314 tok/s; re-load 2.6 s).  =0 = off.
+export STRATA_SERVE_LOOKUP="${STRATA_SERVE_LOOKUP:-14}"
+export STRATA_SERVE_DSPARK_EVICT="${STRATA_SERVE_DSPARK_EVICT:-4096}"
 # prompt speed (s13 run4/run5, 2026-10-15): --prompt-batch 12288 fits only with the chunk prestage
 # region at 1.5 GiB (was 3.0): a 20K prompt 2 sweeps instead of 3, 60.4 -> 53.4 s in serve at 512K (+13%; one-shot
 # 328 -> 382 tok/s).  16384 OOMs (a 1.42 GiB alloc) even at prestage 0.75 - the next step.

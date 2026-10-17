@@ -4594,8 +4594,11 @@ bool Ds41MoeTier::keep_cache_mode() {
 
 int64_t Ds41MoeTier::shrink_cache_for(int64_t need_bytes, std::string& err) {
 #if defined(DS4_MOE_CUDA)
-    if (!im_->gpu || !im_->gpu->cache || !im_->gpu->cache->segmented() || im_->cfg.vram_lru) return -1;
-    if (!im_->shrunk.empty()) return -1;   // one shrink at a time (regrow_cache first)
+    // every refusal says why (s6: the first A/B never kept the cache and logged nothing)
+    if (!im_->gpu || !im_->gpu->cache) { err = "no VRAM cache"; return -1; }
+    if (!im_->gpu->cache->segmented()) { err = "the cache is not segmented"; return -1; }
+    if (im_->cfg.vram_lru) { err = "--vram-lru"; return -1; }
+    if (!im_->shrunk.empty()) { err = "still shrunk from the last batch (regrow_cache did not run)"; return -1; }
     strata::core::ExpertCache& c = *im_->gpu->cache;
     if (cudaDeviceSynchronize() != cudaSuccess) { err = "shrink_cache_for: device failed"; return -1; }
     size_t fr = 0, tot = 0;
@@ -4603,7 +4606,11 @@ int64_t Ds41MoeTier::shrink_cache_for(int64_t need_bytes, std::string& err) {
     const int64_t deficit = need_bytes - (int64_t) fr;
     if (deficit <= 0) return 0;
     const int64_t keep_bytes = c.bytes() - deficit;
-    if (keep_bytes <= 0) return -1;   // the whole cache would go: release_cache is the same thing, done properly
+    if (keep_bytes <= 0) {   // the whole cache would go: release_cache is the same thing, done properly
+        err = "the batch needs the whole cache (deficit " + std::to_string(deficit >> 20) + " MiB, cache " +
+              std::to_string(c.bytes() >> 20) + " MiB)";
+        return -1;
+    }
     const int64_t keep = c.slots_within(keep_bytes);
     const int64_t NX = im_->g.n_experts;
     std::vector<std::array<int32_t, 3>> gone;

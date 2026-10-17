@@ -711,7 +711,7 @@ index 6b36b8fbc..ae3bf82d1 100644
              GGML_ABORT("%s: unsupported src0 type: %s\n", __func__, ggml_type_name(src0_type));
              break;
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index a9038f1f4..11af8c3fd 100644
+index a9038f1f4..644e089ba 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -2391,6 +2391,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
@@ -727,7 +727,33 @@ index a9038f1f4..11af8c3fd 100644
          case GGML_OP_RWKV_WKV7:
              ggml_cuda_op_rwkv_wkv7(ctx, dst);
              break;
-@@ -5209,6 +5215,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -2560,6 +2566,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+     bool use_cuda_graph = true;
+     // Loop over nodes in GGML graph to obtain info needed for CUDA graph
+ 
++    // xolotl s6: GGML_CUDA_GRAPH_MAX_TOKENS=N (default 0 = no limit) - a graph whose matrix products take more than N
++    // token columns (a prompt chunk) runs without a CUDA graph. Launch overhead is noise at prompt batch sizes, and
++    // instantiating a prompt chunk's graph needs VRAM the engine has just given to the chunk (GLM: cudaGraphInstantiate
++    // out of memory on a fresh ~30K prompt). Decode (1 token) keeps its graphs.
++    static const int64_t max_tokens = getenv("GGML_CUDA_GRAPH_MAX_TOKENS") ? atoll(getenv("GGML_CUDA_GRAPH_MAX_TOKENS")) : 0;
++
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         ggml_tensor * node = cgraph->nodes[i];
+ 
+@@ -2567,6 +2579,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+             continue;
+         }
+ 
++        if (max_tokens > 0 && (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) && node->src[1] &&
++            node->src[1]->ne[1] * (node->op == GGML_OP_MUL_MAT_ID ? node->src[1]->ne[2] : 1) > max_tokens) {
++            use_cuda_graph = false;
++            break;
++        }
++
+         // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
+         if (node->op == GGML_OP_MUL_MAT_ID) {
+             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+@@ -5209,6 +5227,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                          return true;
                      case GGML_TYPE_IQ4_NL:
                      case GGML_TYPE_MXFP4:
@@ -735,7 +761,7 @@ index a9038f1f4..11af8c3fd 100644
                          // 32-value sub-blocks, the row size does not guarantee
                          // the QK_K super-blocks the get_rows kernel iterates on
                          return op->src[0]->ne[0] % QK_K == 0;
-@@ -5226,7 +5233,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -5226,7 +5245,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                             (
                                 (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                                 op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
@@ -745,7 +771,7 @@ index a9038f1f4..11af8c3fd 100644
                                 op->src[0]->type == GGML_TYPE_F32
                             ) || (
                                 op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
-@@ -5499,6 +5507,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -5499,6 +5519,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
              return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                  op->src[2]->type == GGML_TYPE_F32 && (op->src[3] == nullptr || op->src[3]->type == GGML_TYPE_F32) &&
                  op->type == GGML_TYPE_F32;
