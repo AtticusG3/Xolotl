@@ -44,6 +44,20 @@
   jobs the reader has not started give the slot back to their victim (bytes untouched), the one in-flight read is
   waited for; `STRATA_ARENA_REBAL_DECODE=0` = reads only at request end; `DS41_CHECK_ARENA=1` also byte-checks restored
   victims. A/B = `verify/s6/ds41-arena-ab.sh` (NEW NEWND OFF OLD CHK), pre-fix binary `verify/s6/build-pre-cancel/`.
+- **ds41 arena fix VERIFIED + committed + pushed** (8d43fe1b): A/B (`verify/s6/ds41-arena-ab.log`) old 221-226
+  prefill @16.5K / decode 14.5-14.9 after 16.5K / +160 turn 11.2-12.7 s; new default (cancel + no decode reads) 268 /
+  21.2 / 8.9 s; arena off 267 / 20.6-20.7 / 8.0-9.0 s; the +169 turn on 6.4K 7.9 s (off 9.0-10.2). DS41_CHECK_ARENA:
+  3,000+ restored victims + 2,500+ published swaps, 0 bad. Default now = reads only between requests
+  (`STRATA_ARENA_REBAL_DECODE=1` = also during decode, -5..-19 % decode). README/BENCHMARKS ds41 prefill corrected
+  (9fba44f1, pushed): 178 / 268 tok/s at 6.1K / 16.5K.
+- **Gauntlet v2 qflash calibration** (`verify/e2e/gauntlet-v2/qflash`): **5/7, SCORE 5.50** (API 5/7, 6.41): 01@8 02@8
+  06@3 07@8 14@3, 03 0.50 (same scene-B wall as the API), 10 0.00; decode 151 tok/s; 2 well-formed unknown-tool calls
+  (`edit_file`), 0 corrupt. **Decision: the v2 set stays frozen** (no all-zero problem; changing it = a new API
+  baseline).
+- **GLM candidate (soft prune + `--route-bias 0.25`), `verify/s6/glm-bias025/`:** replay 13/14 x2 clean (valid names,
+  same calls as exact routing in s5); **e2e HumanEval 19/21, tool 10/10, agentic 3/3, decode 25.3 tok/s** (101,269
+  tokens, 4,263 s). Fails: HE/32 (find_zero, wrong answer after 25.8K tokens), HE/160 (hit the 33,792 ceiling).
+  Exact routing was not run on those two (~1 h each at 10 tok/s).
 - `verify/s6/badcalls.py <run dirs>` counts malformed tool calls in Gauntlet runs (reproduces s5: GLM served 3/27 bad,
   exact 0/39).
 
