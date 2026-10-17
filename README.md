@@ -22,14 +22,15 @@ loops), greedy, thinking on with a 32K-token thinking budget.
 
 | Model | Size | Prefill | Decode | HumanEval | Tool calls | Agentic | Context |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **[DeepSeek-V4.1-Flash](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)** | 552B MoE | **~210 tok/s** (8K prompt) | **26.8 tok/s** | 21/21 | 10/10 | 3/3 | 512K |
+| **[DeepSeek-V4.1-Flash](https://huggingface.co/IndrasMirror/DeepSeek-V4.1-Flash-GSQ-Uncensored)** | 552B MoE | **180-270 tok/s** | **26.8 tok/s** | 21/21 | 10/10 | 3/3 | 512K |
 | **GLM-5.3-Flash** | 320B MoE | — | ~28 tok/s | numbers coming | | | 512K |
 | **Qwen3.8-Flash-Next** | 125B MoE | **3,000-3,430 tok/s** | **127.8 tok/s** | 21/21 | 10/10 | 3/3 | 200K |
 | **Qwen3.8-27B** (dense) | 27B | **1,240-1,390 tok/s** | **98.5 tok/s** | 21/21 | 10/10 | 3/3 | 200K |
 
-<sub>Decode = generation speed during those tasks. Prefill = a fresh 6.5K / 16.7K-token prompt through the server
-(`tools/throughput.py`; Qwen3.8-Flash-Next: 3,430 / 3,005 tok/s, Qwen3.8-27B: 1,385 / 1,244 tok/s), and for
-DeepSeek-V4.1 a 7,806-token prompt; on 20K prompts it reaches ~350-390 tok/s.
+<sub>Decode = generation speed during those tasks. Prefill = a fresh 6K-17K-token prompt through the server
+(`tools/throughput.py`; Qwen3.8-Flash-Next: 3,430 / 3,005 tok/s at 6.5K / 16.7K, Qwen3.8-27B: 1,385 / 1,244 tok/s,
+DeepSeek-V4.1: 178 / 268 tok/s at 6.1K / 16.5K - its prompt batch is sized from free VRAM, ~6-9K tokens per sweep
+on a 24 GB card with the speculative-decode draft loaded).
 GLM-5.3-Flash's full run is being redone with a decode-routing fix (see
 [docs/xolotl/BENCHMARKS.md](docs/xolotl/BENCHMARKS.md)).</sub>
 
@@ -40,7 +41,7 @@ GLM-5.3-Flash's full run is being redone with a decode-routing fix (see
 - **No server farm.** The weights (152 GiB for DeepSeek-V4.1) live across VRAM, pinned RAM and NVMe; the engine
   carries up the experts each token needs.
 - **Fast where it counts.** The Qwen models run at 100-130 tok/s; an agent's small follow-up turn on DeepSeek-V4.1
-  costs ~7.6 s on a 6K context, and the engine learns the conversation's experts between turns.
+  costs ~8 s on a 6K-16K context, and the engine learns the conversation's experts between turns.
 
 ## Quick start
 
