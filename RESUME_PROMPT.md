@@ -85,6 +85,10 @@ tail -3 /home/mal/v41-work/fetch_1017.log "/media/mal/Team CX2/models/DeepSeek-V
   (kept: live `~/AI/Odin/odin.db` + Team CX2 `odin-backups/odin_20261014_203542.db.zst`).
 
 ## 4. Standing rules (Mal) - as session 6 (section 4 below) plus
+- **Public vs private (2026-10-18, Mal):** work in `~/AI/Xolotl` (branch `xolotl`, PRIVATE - never pushed; a pre-push
+  hook refuses it).  GitHub gets the `public` branch from the `~/AI/Xolotl-public` worktree.  Publish with
+  `xolotl-publish` (commits there; `--push` also pushes): it carries over changes since `git config xolotl.lastsync`,
+  skips the private files and stops if a new line mentions private material.
 - **One download at a time**; chain the next only with Mal's OK.  **Never serve/bench a GGUF from exFAT.**
 - **Commit named files only** (box at the top).
 - Outward text (Reddit/HF/GitHub/email) = show it, Mal posts/OKs.  Mal's r/LocalLLaMA thread (2026-10-18): quote measured
