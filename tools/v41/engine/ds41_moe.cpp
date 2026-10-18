@@ -3103,8 +3103,10 @@ bool gpu_run_n_ex(Ds41MoeImpl& im, int64_t layer, int nt, const int32_t* ids, co
         // D3's OWN PCIe share (STRATA_TIER_BATCH_PCIE, default 1 = every arena miss over PCIe): the pool's cost per
         // expert grows with the pass's token count (it computes every routed token) while a DMA does not, and the
         // pool runs serially after the card's launches - measured (DS41_PROF_X): pool ~2 ms per expert, the critical
-        // path of the whole pass.  --pcie (cfg.pcie_frac) stays the single-token decode's knob.
-        static const double d3_frac = std::getenv("STRATA_TIER_BATCH_PCIE") ? std::atof(std::getenv("STRATA_TIER_BATCH_PCIE")) : 1.0;
+        // path of the whole pass.  --pcie (cfg.pcie_frac) stays the single-token decode's knob; this one is
+        // --tier-batch-pcie (cfg.tier_batch_pcie), which also governs every DSpark/serve decode and verify call.
+        static const double d3_env = std::getenv("STRATA_TIER_BATCH_PCIE") ? std::atof(std::getenv("STRATA_TIER_BATCH_PCIE")) : 1.0;
+        const double d3_frac = im.cfg.tier_batch_pcie >= 0.0 ? std::min(1.0, im.cfg.tier_batch_pcie) : d3_env;
         int budget;
         if (im.cfg.dither) {
             const double want = (double) eligible * d3_frac + im.pcie_carry;

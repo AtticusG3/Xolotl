@@ -329,7 +329,8 @@ python3 tools/ds4/ds4_chat.py "Explain RoPE in two sentences." -n 128 --model De
 instead of freezing the desktop - use it. Startup takes ~1.5-2 minutes (the 70 GiB arena is read and pinned).
 
 Useful flags: `--slots N|auto` (VRAM expert cache), `--arena-gib` (pinned RAM arena; the rest is read from the file),
-`--pcie F` (share of misses sent over PCIe), `--pf-b` (predicted prefetch per layer), `--dense-requant q4_k|q5_k|q6_k`,
+`--pcie F` (share of misses sent over PCIe - **single-token decode only**), `--tier-batch-pcie F` (the same share
+for batched passes: prompt chunks and **every serve / DSpark decode and verify call** - see below), `--pf-b` (predicted prefetch per layer), `--dense-requant q4_k|q5_k|q6_k`,
 `--vram-lru` (misses take the layer's least-recently-used VRAM slot), `--arena-skip-resident` (the VRAM-seeded
 experts stay out of the RAM arena), `--prefill-chunk N` / `--chunk-mmq` / `--chunk-prestage` (prefill),
 `--prune F` / `--prune-penalty X` / `--saliency F` / `--arena-adapt` (adaptive expert pruning, see above),
@@ -338,6 +339,22 @@ see above), `--pos-offset N` (decode-timing probe at a deep position, no prefill
 `--skip-miss T` (lossy, see below), `--mtp FILE [--verify]` (DeepSeek-V4's MTP draft head:
 63% acceptance measured; `--verify` is CPU-tested, not yet tuned on CUDA, and chunked prefill does not fill the MTP
 window yet), `--ppl` (perplexity of the prompt), `--dump-logits`, `--temp`, `--ctx`.
+
+**PCIe vs CPU pool for RAM-tier misses.**  An expert that is in the RAM arena but not in VRAM is either copied to the
+card over PCIe or computed in place by the CPU pool.  Two knobs set the share that goes over PCIe:
+
+| Flag | Env | Default | Governs |
+|---|---|---|---|
+| `--pcie F` | - | 0.75 | the single-token decode path (`gpu_run`); **not used by `--serve` with DSpark** |
+| `--tier-batch-pcie F` | `STRATA_TIER_BATCH_PCIE` | 1.0 | batched passes (`gpu_run_n_ex`): prompt chunks and every serve / DSpark decode + verify |
+
+So with the served config (DSpark on), `--tier-batch-pcie` is the one that matters, and at its default the CPU pool
+never runs.  The default fits an 8-core dual-channel DDR4 desktop (Ryzen 7 5700X: the pool does ~24 GB/s, about the
+same as PCIe, so 0.5-0.85 measured -5 % to -8 % or within noise).  On a many-core, many-channel host set it low:
+chimpera measured a 24-core Threadripper 5965WX (~150 GB/s) + RTX 5090 on gen4 going from 30 / 44 to 43 / 64 tok/s
+(prose / code, DSpark serve) at `--tier-batch-pcie 0`, monotone from 1.0 down, threads plateau at 16+
+([#3](https://github.com/Indras-Mirror/Xolotl/issues/3)).  FreeToken's rule of thumb: the pool pays when its expert
+bandwidth is well above PCIe's (about 2x).  Sweep 1.0 / 0.5 / 0.0 on your box.
 
 ### Cache-aware routing (`--route-bias`, lossy, off by default)
 Adds `D` to the router's *selection* score of experts already in VRAM (the mixing weights stay exact), so near-ties

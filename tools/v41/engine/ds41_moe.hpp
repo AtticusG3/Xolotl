@@ -277,7 +277,11 @@ std::vector<std::pair<int32_t, int32_t>> ds41_read_ranked(const std::string& pat
 /// past it is read from the blob source on demand (the file tier).
 struct Ds41MoeConfig {
     int64_t slots = 2150;         ///< VRAM expert slots (6.75 MiB each); 0 or `no_cache` = none
-    double pcie_frac = 0.25;      ///< share of the (non-prefetched) misses computed on the GPU
+    double pcie_frac = 0.25;      ///< share of the (non-prefetched) misses computed on the GPU - single-token decode only
+    /// The same share for the batched path (gpu_run_n_ex): prompt passes AND every DSpark/serve decode or verify call.
+    /// < 0 = STRATA_TIER_BATCH_PCIE, else 1.0 (every arena miss over PCIe; measured best on 8-core dual-channel DDR4).
+    /// Many-core / many-channel hosts want it low: 0.0 = +60% serve decode on a 24-core Threadripper (GitHub #3).
+    double tier_batch_pcie = -1.0;
     int threads = 0;              ///< CPU pool workers; 0 = every physical core but the first
     bool pin = true;              ///< register the host arena with CUDA so the PCIe share DMAs out of it
     double arena_gib = 72.6;      ///< host arena budget; the file tier takes the rest
