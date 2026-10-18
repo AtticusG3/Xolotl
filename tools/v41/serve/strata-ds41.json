@@ -2,7 +2,7 @@
   "exe": "/home/mal/AI/Xolotl/tools/v41/serve/ds41-engine.sh",
   "args": [
     "-m",
-    "/media/mal/SSD NVME/AI/V41-GSQ/V41-GSQ.gguf",
+    "/media/mal/SSD NVME/AI/V41-GSQ-v2/V41-GSQ-v2.gguf",
     "--backend",
     "cuda",
     "--experts",
@@ -10,7 +10,7 @@
     "--engram",
     "/media/Crucial1TB/V41-Engram:/media/mal/SSD NVME/AI/V41-Engram",
     "--rank",
-    "/media/mal/SSD NVME/AI/V41-GSQ/rank.bin",
+    "/media/mal/SSD NVME/AI/V41-GSQ-v2/rank.bin",
     "--ctx",
     "524288",
     "--stop",

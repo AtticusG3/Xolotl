@@ -3574,7 +3574,8 @@ bool gpu_run_n_ex(Ds41MoeImpl& im, int64_t layer, int nt, const int32_t* ids, co
 /// over k is done on the host.
 // MIMO_CHUNK_PROF=1: run_chunk's time split (host waits on the copy events / final sync, GPU time of the grouped
 // launches by event pairs), printed by release_chunk.  Timing only - the same work runs.
-struct ChunkProf { double file_gb = 0, rd_busy = 0; double wall = 0, file = 0, file_rd = 0, wait_copied = 0, sync = 0, kern = 0, resident_kern = 0; int64_t calls = 0, launches = 0; };
+struct ChunkProf { double file_gb = 0, rd_busy = 0; double wall = 0, file = 0, file_rd = 0, wait_copied = 0, sync = 0, kern = 0, resident_kern = 0; int64_t calls = 0, launches = 0;
+                   double tc = 0, tc_gb = 0; int64_t tc_launches = 0, mmq_subruns = 0; };   // + the PTQ1_0 -> Q2_0 transcode inside MMQ
 ChunkProf g_cprof;
 bool chunk_prof() { static const bool on = [] { const char* e = std::getenv("MIMO_CHUNK_PROF"); return e && *e == '1'; }(); return on; }
 
@@ -3768,6 +3769,7 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
     Gpu& gp = *im.gpu;
     const bool prof = chunk_prof();
     std::vector<std::pair<cudaEvent_t, cudaEvent_t>> kev;   // prof: one pair per grouped launch
+    std::vector<std::pair<cudaEvent_t, cudaEvent_t>> tcev;  // prof: one pair per MMQ sub-run's PTQ1_0 transcode (inside kev)
     bool in_resident = true;
     std::vector<char> kev_res;
     const int64_t H = im.g.n_embd, K = im.g.top_k, NE = (int64_t) n * K;
@@ -3974,9 +3976,22 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
         // are SL apart, the copies SL2 apart; same stream, so the copies are done before the products read them)
         const int nq = (int) (q1 - q0);
         uint8_t* tc = (uint8_t*) gp.m_tc;
+        cudaEvent_t tc0 = nullptr, tc1 = nullptr;
+        const bool tcp = prof && (MP.tg || MP.tu || MP.td);
+        if (tcp) {
+            cudaEventCreate(&tc0);
+            cudaEventCreate(&tc1);
+            cudaEventRecord(tc0, gp.s);
+        }
         if (MP.tg) ds41_ptq1_to_q2_0_strided(base, (size_t) SL, tc + MP.g2, MP.SL2, MP.g_bytes, nq, gp.s);
         if (MP.tu) ds41_ptq1_to_q2_0_strided(base + GL.up_off, (size_t) SL, tc + MP.u2, MP.SL2, MP.u_bytes, nq, gp.s);
         if (MP.td) ds41_ptq1_to_q2_0_strided(base + GL.down_off, (size_t) SL, tc + MP.d2, MP.SL2, MP.d_bytes, nq, gp.s);
+        if (tcp) {
+            cudaEventRecord(tc1, gp.s);
+            tcev.emplace_back(tc0, tc1);
+            g_cprof.tc_gb += (double) nq * (double) (MP.g_bytes + MP.u_bytes + MP.d_bytes) / 1e9;
+        }
+        if (prof) ++g_cprof.mmq_subruns;
         mmq::Product p;
         p.n = nq;
         p.bounds = (const int32_t*) gp.m_bnd;
@@ -4387,6 +4402,14 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
             cudaEventDestroy(kev[i].first);
             cudaEventDestroy(kev[i].second);
         }
+        for (auto& e : tcev) {
+            float ms = 0;
+            cudaEventElapsedTime(&ms, e.first, e.second);
+            g_cprof.tc += ms;
+            cudaEventDestroy(e.first);
+            cudaEventDestroy(e.second);
+        }
+        g_cprof.tc_launches += (int64_t) tcev.size();
         g_cprof.launches += (int64_t) kev.size();
         g_cprof.calls += 1;
         g_cprof.file += t_file;
@@ -4720,6 +4743,9 @@ void Ds41MoeTier::release_chunk() {
                      (long long) c.calls, (long long) c.launches, c.wall, c.file, c.wait_copied, c.sync,
                      c.wall - c.file - c.wait_copied - c.sync, c.file_rd, c.kern, c.resident_kern, c.file_gb, c.rd_busy,
                      c.rd_busy > 0 ? c.file_gb / (c.rd_busy / 1000.0) : 0.0);
+        std::fprintf(stderr, "chunk prof MMQ: %lld sub-runs; PTQ1_0 -> Q2_0 transcode %.0f ms GPU (inside the grouped "
+                             "kernels) over %lld sub-runs, %.1f GB of ternary read = %.0f GB/s\n",
+                     (long long) c.mmq_subruns, c.tc, (long long) c.tc_launches, c.tc_gb, c.tc > 0 ? c.tc_gb / (c.tc / 1000.0) : 0.0);
         g_cprof = ChunkProf{};
     }
     if (chunk_prof() && (g_pf.blobs || g_pf.used)) {

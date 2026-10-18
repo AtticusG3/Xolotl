@@ -72,6 +72,24 @@ python3 -m serve.server --engine strata --config <your-27b.json> --port 8090    
 
 Then point any OpenAI- or Anthropic-compatible client at `http://127.0.0.1:<port>/v1`.
 
+### Will it run on my machine? (DeepSeek-V4.1)
+
+What I've measured is one setup: **RTX 4090 (24 GB), 90 GB DDR4, Linux, NVMe**. Beyond that:
+
+- **OS:** Linux only for the DeepSeek engine for now (the launcher and the expert/Engram disk reads are Linux-specific).
+  The Strata core runs on Windows, but the DeepSeek side doesn't yet. WSL2 might work but is untested; keep the model
+  files inside WSL's own filesystem, not on a Windows drive.
+- **GPU:** NVIDIA, compute capability 7.5 or newer (RTX 20/30/40/50). Build with your card's architecture:
+  `-DCMAKE_CUDA_ARCHITECTURES=86` for RTX 30, `89` for RTX 40, `120` for RTX 50 (use CUDA 13.x for RTX 50; 12.8 builds
+  had prompt-path crashes).
+- **VRAM:** 24 GB is what I run. 16 GB should load but is untested, and prompts get processed in smaller batches, so
+  prefill will be slower. Below 16 GB won't work.
+- **RAM:** 90 GB here, with a 64 GB expert cache in RAM. Less RAM means a smaller cache, so more experts come off the
+  NVMe each token and decode is slower. More RAM helps: around 256 GB holds every expert.
+- **Disks:** about 152 GiB for the quant plus ~200 GB for the Engram tables. Both want a fast NVMe on ext4 or NTFS.
+  **Not exFAT** (Linux's exFAT driver serialises parallel reads; expert reads were 5x slower here) and not a hard
+  drive (the Engram lookups are ~48 small random reads per token).
+
 ## How it works, in one paragraph
 
 A mixture-of-experts model only uses a few experts per token. Xolotl keeps every expert somewhere - the hottest in

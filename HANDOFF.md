@@ -1,5 +1,66 @@
 # Xolotl — HANDOFF (2026-10-17, session 6 — CURRENT; sessions 5 and earlier below are history)
 
+## S7 Session 7 (2026-10-18 08:00-) - running log, newest last
+- **Gauntlet v2 on the Q6_K-dense default (`verify/e2e/gauntlet-v2-q6k/score.txt`): ds41 5/7, SCORE 5.50, decode
+  36.7 tok/s** (v1 Q8_0: 4/7, 6.20, 23.4).  01 + 07 now PASS (were 0.92 / 0.77); **14 = FAIL by Mal's call**: v1 solved
+  it at turn 3, this run over-verified - turns 3-7 each ~28K thinking tokens (the budget), prompt growing 29K -> 113K;
+  stopped at turn 7 by killing the server (the task records a chat error and is graded; the other 6 results kept).
+  Decode on the long thinking stretches was **42-56 tok/s** (DSpark accepts well on repetitive reasoning) - a
+  candidate line for the HF card / README (not posted; Mal to OK the text).  One run - one task flipping is noise-level.
+- **Prefix-cache BUG (to fix):** task 14 turn 7 re-read all 113,736 prompt tokens ("reused 0", ~300 s at ~370 tok/s
+  in 10,225-token batches); turns 4-6 reused 29K / 57K / 85K fine.  Lead: turn 6 was the only turn whose thinking ran
+  PAST the 27,648 cap (server.log ~5578: "thinking: 28414 of max 36864" - the "of budget" -> "of max" switch, done at
+  28,433 tokens), so the engine's own token sequence (with the forced end of thinking) likely no longer matches the
+  history the client sent back -> prefix match fails from the first differing token (here: apparently from 0, which
+  is a second question - partial reuse should still have covered the 85K before turn 6).  Repro: a turn whose thinking
+  hits the cap, then any follow-up.  Files: `tools/v41/serve/serve_ds41.py` (budget / forced `</think>`), the engine's
+  prefix matcher (ds41_generate serve path).
+- CPU prep (commit beb27b33): `V41_SRC` override; v2's own rank.bin (+ `strata-ds41-v2r.json`); stale-rank effect = small;
+  **v2 was served from exFAT (NVME1TB) vs v1 ntfs3 (SSD NVME)** -> `docs/ds4/V41_TERNARY_PROFILE_PLAN.md`.
+- Speed re-test `verify/s6/v1v2r-speed.sh` running 08:47 (log `verify/s6/v1v2r-speed.log`); the morning diag was
+  STOPPED (not run) to free the GPU for it - re-run `bash verify/s6/morning-diag.sh` after (it waits on score.txt,
+  which exists, so it starts at once).
+- Disk: deleted `/media/Crucial1TB/MCP` (stale), all Odin DB copies on Crucible (Mar 2026) + `Odin/experiments/data/odin_test.db`
+  (kept: live odin.db + `Team CX2/odin-backups/odin_20261014_203542.db.zst`); 2 unremovable files left on Crucible
+  (NTFS I/O error - needs chkdsk/ntfsfix).  1017 rest-of-shards download -> Crucial1TB waits for the Engram one (Mal:
+  one download at a time).
+
+- **09:10 v2 re-test with its own rank** (`verify/s6/v1v2r-speed.log`): still slower off disk, equal/faster on the edit
+  probe.  **Disk microbench: exFAT NVME1TB 0.96 GB/s O_DIRECT expert reads (no thread scaling) vs ntfs3 SSD NVME
+  5.1-5.3; raw NVME1TB 3.31** -> v2's slowdown is the filesystem, not ternary.  Buffered reads on exFAT 0.58 GB/s;
+  FIEMAP unsupported on exFAT.  Engram random 4K reads: NVME1TB 10.3K/s, Team CX2 5.6K/s, Crucible 4.4K/s.
+- **09:23 `verify/s7/swap-v2-test.sh` armed** (v2 onto SSD NVME for a fair test; v1 to a verified temp copy on NVME1TB
+  and back; duplicate dealignai shards 47/48 on NVME1TB deleted first).  09:30: `MIMO_CHUNK_PROF` transcode timer
+  (0d980857), built into build-s6 only; `verify/s7/v2s-speed.sh` adds prof / tc3 / mmvq arms.
+- **09:50 Mal: skip the x0.3 bias test** (the 1017 may change the overthinking picture) - think diag allowed to finish,
+  a watcher stops morning-diag.sh before the bias test.  **1017 download split** (Crucial too small by ~23 GB):
+  `tools/v41/fetch_1017.sh` (armed after the Engram loop): small files + shards 1-39 -> Crucial1TB (MAIN), 40-46 ->
+  Crucible, 47-48 already on Team CX2.  1017 calib work dir `/home/mal/v41-work/calib-1017` (tokens/hashes/meta copied).
+- **GIT DISCIPLINE (shared worktree)**: several sessions use `~/AI/Xolotl` at once.  Commit **named files only**;
+  never `git add -A`, `git add .` or `git commit -a`.
+
+- **10:39 swap test DONE** (v1 restored, verified): v2 on SSD NVME >= v1 (prefill +5 %, edits +12 %, decode ~= / +10 % at
+  16.5K); transcode 52 / 137 ms per 6K / 16K prompt (~0.2 %); MMVQ-for-ternary worse; TC_GIB=3 maybe +3-5 % (1 run).
+- **10:45 Mal: v2-style map for the 1017** - **10:50: but gentler in 20-35** (sacrifice some size for chat quality;
+  agentic/tools/code first, balanced).  `v41_calib.py prep --mix` added; the 1017 calibration set rebuilt with chat 4 /
+  multi 2 / agentic_long 8 (45420fbf).  Note: prep reads live ~/AI text, so it never reproduces an old set (the V4.1
+  default re-run differed in 30/32 sequences) - the saved tokens/hashes/meta are the record.
+- **11:00-11:10 Mal: v2 replaces v1 everywhere until the 1017**: v1 GGUF deleted, v2 copied to `SSD NVME/AI/V41-GSQ-v2/`
+  (sha256 verified), NVME1TB copy deleted, configs repointed (dfa0ea32), smoke test OK.  No v2 upload unless asked.
+- **HF card update note - DRAFT, waiting for Mal's OK** (the Q6_K line needs the Xolotl commits pushed first):
+  > **Update, 18 Oct 2026** - A few things since this went up:
+  > - **Faster decode, same file.** Xolotl now re-quantises the dense half to Q6_K at load by default: +11-35% decode
+  >   on long contexts and +9% on edits, for about 1% more KL vs FP8. Just pull the latest Xolotl, no re-download.
+  > - **I built a v2 of this quant**: 140 GiB instead of 152, with act-order GPTQ. Quality about the same (slightly better
+  >   held-out perplexity, 0.36 pt lower agreement with the API on chat-style prompts). Served from the same drive it's
+  >   as fast or faster: +5% prefill, +12% on edits. It's what I'm running now.
+  > - **Working on DeepSeek-V4.1-Flash-1017 now.** Same architecture, so it should run at the same speed. Downloading
+  >   at the moment (slow internet), quant up in a few days.
+  > - **If you'd like v2 before then**, say so in the Community tab and I'll upload it after the 1017.
+  > - **Tip:** don't put the GGUF or the Engram tables on an exFAT drive - Linux's exFAT driver serialises parallel
+  >   reads; expert reads were 5x slower for me (0.96 vs 5.1 GB/s).
+- 11:20 RESUME_PROMPT START HERE rewritten as one block for both session-7 windows.
+
 ## S6 Session 6 (2026-10-17 09:40-) - running log, newest last
 - **GPU ownership**: no peer on the GPU at start (bfd97150 idle since 08:06; the 09:20 ds41 start was the outreach
   session's throughput probe for the Phison call, during Teams = 10 GiB free VRAM -> batch 5192, not a quiet number).
@@ -130,6 +191,20 @@
   in the 15 stopped on their own (not cut off); its 3 length-capped lcb60 problems are outside the 15. Mal (19:15):
   run the rest with full thinking -> `verify/s6/lcb15-full.log` (build-xolotl, CB_THINK=98304, no deadline, resumable:
   done ids are skipped). HF card updated (commit 6992cf5e, "Against the DeepSeek API").
+
+- **Night (19:10-23:00)**: LCB local full-thinking run paused at 5/15 (all 5 PASS; abc398_f/3751/abc395_e/abc400_c/
+  abc395_f; resumable `verify/s6/ds41-lcb15.sh`, CB_THINK=98304, cap 76.8K); API re-run of its 6 lcb60 misses at max
+  effort (`runs/api-lcb60-max`, ~200K tokens ~$0.12): abc400_d / abc400_g / 3762 PASS, abc398_f / 3763 / arc190_a still
+  fail.  API facts (docs): deepseek-flash = DeepSeek-V4.1-Flash-1017; temperature ignored in thinking mode.
+  HF card updated (6992cf5e); GitHub pushed to 7375e305.  Then the quant investigation + v2 requant: see the START HERE
+  block of RESUME_PROMPT.md (2026-10-17 23:00).
+
+- **Night + morning (2026-10-17 23:00 - 10-18 07:50): the quant investigation + GSQ v2** - full results in the
+  START HERE block of RESUME_PROMPT.md (2026-10-18 07:50).  In one line each: FP8 93.65 % vs v1 86.13 % API top-1 (the
+  quant is the gap); error-fixing adapters 1-5 %; Hadamard skipped (< 1 GiB, needs the fused down kernel); act-order
+  adopted; v2 built (139.8 GiB, ppl 5.603 vs 5.645, fixtures 85.76 vs 86.12 %, but slower - not default); dense Q6_K
+  at load = the new served default (0ecf9111, not pushed); GitHub issue #2 answered (kept open); 1017 Engram shards
+  downloading to Team CX2 (resumable).
 
 # Xolotl — HANDOFF (2026-10-17, session 5 — history)
 **RESUME = the "START HERE" block at the top of `RESUME_PROMPT.md`** (written at the end of session 5, ~08:20). It
