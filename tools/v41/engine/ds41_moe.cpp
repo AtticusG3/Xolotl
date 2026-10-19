@@ -1689,6 +1689,10 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
         // pinned arena, file-tier blobs read by 8 threads into pinned buffers (the serial seed read one blob at a time:
         // ~7 s for ~1850 experts after a prompt).  Same slots, same bytes.
         strata::core::ExpertCache& cache = *im_->gpu->cache;
+        if (im_->cfg.cuda_device >= 0 && cudaSetDevice(im_->cfg.cuda_device) != cudaSuccess) {
+            err = "seed: cudaSetDevice failed";
+            return false;
+        }
         std::vector<std::array<int64_t, 3>> fjobs;   // slot, layer, expert
         for (const auto& le : fill_order) {
             if (filled >= want) break;
@@ -1710,8 +1714,15 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
         std::vector<std::thread> th;
         const double t0 = now_ms();
         const int nth = (int) std::min<size_t>(8, fjobs.size());
+        const int seed_dev = im_->cfg.cuda_device;
         for (int k = 0; k < nth; ++k)
-            th.emplace_back([&]() {
+            th.emplace_back([&, seed_dev]() {
+                if (seed_dev >= 0 && cudaSetDevice(seed_dev) != cudaSuccess) {
+                    bad = true;
+                    std::lock_guard<std::mutex> lk(mu);
+                    terr = "seed worker: cudaSetDevice failed";
+                    return;
+                }
                 uint8_t* buf = nullptr;
                 if (cudaMallocHost((void**) &buf, (size_t) im_->blob) != cudaSuccess) {
                     bad = true;

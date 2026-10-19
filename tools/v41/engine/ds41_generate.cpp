@@ -1276,8 +1276,29 @@ int main(int argc, char ** argv) {
         const int step_max = std::getenv("STRATA_SERVE_STEP_MAX") ? std::atoi(std::getenv("STRATA_SERVE_STEP_MAX")) : 768;
         // STRATA_SERVE_PASS_BIAS=0: those passes route exactly (the decode biases only while decoding)
         const bool pass_bias = !(std::getenv("STRATA_SERVE_PASS_BIAS") && std::getenv("STRATA_SERVE_PASS_BIAS")[0] == '0');
-        std::printf("INFO ctx=%d experts_vram=%lld arena_experts=%lld\n", ctxv, (long long) tier.resident(),
-                    (long long) tier.arena_experts());
+        // Dual-V100: fill the VRAM expert cache at load (Qwen-like) instead of waiting for the first decode.
+        // Layer-major batches still release/re-seed via the paths below. Opt out: STRATA_SERVE_SEED_AT_READY=0.
+        if (defer_vram && !(std::getenv("STRATA_SERVE_SEED_AT_READY") && std::getenv("STRATA_SERVE_SEED_AT_READY")[0] == '0')) {
+            if (!open_cache()) {
+                std::fprintf(stderr, "serve: VRAM seed at ready failed: %s\n", err.c_str());
+            } else {
+                cache_open = true;
+                int64_t resid = 0, arena_n = 0;
+                for (int st = 0; st < pipe.n_stages(); ++st) {
+                    resid += pipe.tier(st).resident();
+                    arena_n += pipe.tier(st).arena_experts();
+                }
+                std::fprintf(stderr, "serve: VRAM ready seed -> %lld experts in VRAM, %lld arena (seed %.2f s)\n",
+                             (long long) resid, (long long) arena_n, seed_s);
+            }
+        }
+        { int64_t resid = 0, arena_n = 0;
+          for (int st = 0; st < pipe.n_stages(); ++st) {
+              resid += pipe.tier(st).resident();
+              arena_n += pipe.tier(st).arena_experts();
+          }
+          std::printf("INFO ctx=%d experts_vram=%lld arena_experts=%lld\n", ctxv, (long long) resid, (long long) arena_n);
+        }
         std::printf("READY %d stop\n", ctxv);
         std::fflush(stdout);
         std::fprintf(stderr, "serve: ready (ctx %d, prefill chunk %d)\n", ctxv, NP);
