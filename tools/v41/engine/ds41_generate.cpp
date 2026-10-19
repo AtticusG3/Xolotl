@@ -478,6 +478,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "ds41_generate: pipeline: %s\n", err.c_str());
         return 1;
     }
+    if (std::getenv("STRATA_SELFTEST_HANDOFF")) {
+        if (!ds41_selftest_handoffs(pipe, err)) {
+            std::fprintf(stderr, "ds41_generate: handoff self-test failed: %s\n", err.c_str());
+            return 1;
+        }
+    }
     Ds41Dense & dense = ds41_head_dense(pipe);
     const Ds41Geometry & G = pipe.dense(0).geom();
     const int n_layer = (int) G.n_layer, n_embd = (int) G.n_embd, top_k = (int) G.n_used, nv = (int) G.vocab;

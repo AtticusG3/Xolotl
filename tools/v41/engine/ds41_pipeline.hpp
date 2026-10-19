@@ -66,4 +66,9 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
                          Ds41DenseConfig dc_template, Ds41MoeConfig mc_template, Ds41FileBlobs & shared_blobs, Ds41Pipeline & out,
                          std::string & err);
 
+/// One-time stderr lines for each stage boundary (and tail->head when offloaded).
+void ds41_log_pipeline_handoffs(const Ds41Pipeline & pipe);
+/// Round-trip a dummy column across every boundary; for STRATA_SELFTEST_HANDOFF=1 at load.
+bool ds41_selftest_handoffs(Ds41Pipeline & pipe, std::string & err);
+
 }  // namespace strata::v41

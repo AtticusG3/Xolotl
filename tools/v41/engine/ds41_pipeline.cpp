@@ -39,6 +39,101 @@ static ggml_backend_t make_cuda_backend(int device, std::string & err) {
 #endif
 }
 
+#ifdef STRATA_ENABLE_CUDA
+static const char * handoff_mode_label(int src_dev, int dst_dev) {
+    if (src_dev == dst_dev) return "same-device";
+    int ab = 0, ba = 0;
+    cudaDeviceCanAccessPeer(&ab, src_dev, dst_dev);
+    cudaDeviceCanAccessPeer(&ba, dst_dev, src_dev);
+    return (ab && ba) ? "peer" : "pinned-host";
+}
+
+void ds41_log_pipeline_handoffs(const Ds41Pipeline & pipe) {
+    if (pipe.n_stages() < 2) return;
+    for (int s = 0; s + 1 < pipe.n_stages(); ++s) {
+        const int a = pipe.stages[(size_t) s].cuda_device;
+        const int b = pipe.stages[(size_t) (s + 1)].cuda_device;
+        std::fprintf(stderr, "ds41: handoff stage %d -> %d (GPU %d -> %d): %s\n", s, s + 1, a, b, handoff_mode_label(a, b));
+    }
+    if (pipe.head_offload()) {
+        const int tail = pipe.stages.back().cuda_device;
+        const int hd = pipe.head->cuda_device;
+        std::fprintf(stderr, "ds41: handoff tail -> head (GPU %d -> %d): %s\n", tail, hd, handoff_mode_label(tail, hd));
+    }
+}
+#else
+void ds41_log_pipeline_handoffs(const Ds41Pipeline &) {}
+#endif
+
+bool ds41_selftest_handoffs(Ds41Pipeline & pipe, std::string & err) {
+    if (pipe.n_stages() < 1) return true;
+    constexpr int kCols = 1;
+    std::vector<float> expect, got;
+    std::vector<std::vector<float>> stage_pat((size_t) pipe.n_stages());
+    for (int s = 0; s < pipe.n_stages(); ++s) {
+        Ds41Dense & d = pipe.dense(s);
+        const size_t nf = d.handoff_bytes_per_column() / sizeof(float);
+        stage_pat[(size_t) s].resize(nf);
+        for (size_t i = 0; i < nf; ++i) stage_pat[(size_t) s][i] = 0.125f * (float) (s + 1) + 1e-5f * (float) i;
+#ifdef STRATA_ENABLE_CUDA
+        cudaSetDevice(pipe.stages[(size_t) s].cuda_device);
+#endif
+        if (!d.import_handoff(0, kCols, stage_pat[(size_t) s].data())) {
+            err = "selftest seed stage " + std::to_string(s) + ": " + d.last_error();
+            return false;
+        }
+        if (!d.set_pass_layout(kCols, 0)) {
+            err = "selftest layout stage " + std::to_string(s) + ": " + d.last_error();
+            return false;
+        }
+    }
+    for (int s = 0; s + 1 < pipe.n_stages(); ++s) {
+        if (!pipe.sync_handoff_between(s, s + 1, 0, kCols, err)) {
+            err = "selftest stage " + std::to_string(s) + "->" + std::to_string(s + 1) + ": " + err;
+            return false;
+        }
+        expect = stage_pat[(size_t) s];
+        got.resize(expect.size());
+        Ds41Dense & dst = pipe.dense(s + 1);
+#ifdef STRATA_ENABLE_CUDA
+        cudaSetDevice(pipe.stages[(size_t) (s + 1)].cuda_device);
+#endif
+        if (!dst.export_handoff(0, kCols, got.data())) {
+            err = "selftest export stage " + std::to_string(s + 1) + ": " + dst.last_error();
+            return false;
+        }
+        for (size_t i = 0; i < expect.size(); ++i)
+            if (got[i] != expect[i]) {
+                err = "selftest mismatch stage " + std::to_string(s) + "->" + std::to_string(s + 1) + " at float " + std::to_string(i);
+                return false;
+            }
+    }
+    if (pipe.head_offload()) {
+        const int last = pipe.n_stages() - 1;
+        if (!pipe.sync_head_state(0, kCols, err)) {
+            err = "selftest head handoff: " + err;
+            return false;
+        }
+        expect = stage_pat[(size_t) last];
+        got.resize(expect.size());
+#ifdef STRATA_ENABLE_CUDA
+        cudaSetDevice(pipe.head->cuda_device);
+#endif
+        if (!pipe.head->dense->export_handoff(0, kCols, got.data())) {
+            err = std::string("selftest head export: ") + pipe.head->dense->last_error();
+            return false;
+        }
+        for (size_t i = 0; i < expect.size(); ++i)
+            if (got[i] != expect[i]) {
+                err = "selftest mismatch tail -> head at float " + std::to_string(i);
+                return false;
+            }
+    }
+    std::fprintf(stderr, "ds41: handoff self-test OK (%d stage(s)%s)\n", pipe.n_stages(),
+                 pipe.head_offload() ? ", head offload" : "");
+    return true;
+}
+
 static double free_vram_gib(ggml_backend_t be, double margin_gib) {
     if (!be || ggml_backend_is_cpu(be)) return 0.0;
     size_t fr = 0, tot = 0;
@@ -112,11 +207,21 @@ bool Ds41Pipeline::sync_head_state(int col0, int n, std::string & err) {
     Ds41Dense & tail = dense(n_stages() - 1);
     Ds41Dense & hd = *head->dense;
     const int tail_dev = stages.back().cuda_device;
+    const int pass_n = tail.pass_size();
+    const int pass_pos0 = tail.pass_pos0();
+    if (pass_n < 1 || col0 + n > pass_n) {
+        err = "head handoff: tail pass not active (pass_size=" + std::to_string(pass_n) + ")";
+        return false;
+    }
 #ifdef STRATA_ENABLE_CUDA
     cudaSetDevice(head->cuda_device);
 #endif
     if (!hd.import_handoff_from(tail, tail_dev, head->cuda_device, col0, n, head->cuda_stream, handoff_host)) {
         err = "head handoff: " + hd.last_error();
+        return false;
+    }
+    if (!hd.set_pass_layout(pass_n, pass_pos0)) {
+        err = "head pass layout: " + hd.last_error();
         return false;
     }
     return true;
@@ -268,6 +373,7 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         if (!hs.dense->init(model, hdc, err)) return false;
         std::fprintf(stderr, "ds41: output head + DSpark on CUDA device %d (trunk stages above)\n", hs.cuda_device);
     }
+    ds41_log_pipeline_handoffs(out);
     return true;
 }
 

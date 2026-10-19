@@ -161,6 +161,11 @@ public:
     int64_t layer_lo() const;
     int64_t layer_hi() const;
     bool owns_head() const;
+    /// Current pass width / start position (set by begin / begin_batch / begin_*_continued).
+    int pass_size() const;
+    int pass_pos0() const;
+    /// After a pipeline handoff: mirror the source pass layout so logits() row checks match (head-only and trunk).
+    bool set_pass_layout(int n, int pos0);
     /// PCIe handoff between pipeline stages: per-column x_state [D,HC] then pre_state [HC], column-major (n columns).
     size_t handoff_bytes_per_column() const;
     bool export_handoff(int col0, int n, float * dst) const;
