@@ -703,6 +703,7 @@ int main(int argc, char ** argv) {
     // a few tokens in ONE dense pass (the dense weights - ~8 GB - read once for m tokens, not per token), the routed
     // experts token by token from the VRAM cache (run_to_dev into the pass's routed rows): --serve's short turns.
     // Row-batched matmuls: the same model, not the same bits as m single steps.
+    double fd_dense = 0, fd_tier = 0, fd_logits = 0;   // prompt wall split (printed with the prompt line)
     std::vector<int> mids;
     std::vector<float> mw;
     auto pass_m = [&](const int * toks, int m, int pos) -> bool {
@@ -955,7 +956,6 @@ int main(int argc, char ** argv) {
         apply_bias();
         return true;
     };
-    double fd_dense = 0, fd_tier = 0, fd_logits = 0;   // prompt wall split (printed with the prompt line)
     bool enc_reported = false;
     // ---- env-gated per-layer dumps (determinism bisect): STRATA_LAYER_DUMP=<dir> writes, for every layer of the
     // sequential chunk path, the routed experts' input (fn, the dense half's output) and their weighted sum, plus an
