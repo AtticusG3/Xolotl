@@ -3437,9 +3437,10 @@ bool gpu_run_n_ex(Ds41MoeImpl& im, int64_t layer, int nt, const int32_t* ids, co
                      im.nact_multi_n.size(), im.nact_multi_act.size());
         for (int i = 0; i < nj; ++i) {
             const cpu::ExpertJobMulti& j = im.jobs[(size_t) i];
-            std::fprintf(stderr, "[dbg_x] job%d blob=%p fmt=%p gu_act=%d gu_type=%d act_bytes=%d nt=%d nact0=%p out0=%p\n",
-                         i, (const void*) j.blob, (const void*) j.fmt, j.fmt ? j.fmt->gu_act : -9, j.fmt ? j.fmt->gu_type : -9,
-                         j.fmt ? j.fmt->act_bytes : -9, j.nt, j.nact[0], (void*) j.out[0]);
+            std::fprintf(stderr, "[dbg_x] job%d blob=%p fmt=%p gu_act=%p gu_type=%d act_bytes=%d nt=%d nact0=%p out0=%p\n",
+                         i, (const void*) j.blob, (const void*) j.fmt, j.fmt ? (const void*) j.fmt->gu_act : nullptr,
+                         j.fmt ? j.fmt->gu_type : -9, j.fmt ? j.fmt->act_bytes : -9, j.nt, (void*) j.nact[0],
+                         (void*) j.out[0]);
         }
     }
     xmark(3);
