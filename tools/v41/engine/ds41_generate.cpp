@@ -1450,17 +1450,24 @@ int main(int argc, char ** argv) {
                     const double need = (4.3 * 1073741824.0 + 0.95 * 1048576.0 * (double) std::min(dh, PB)) +
                                         a.vram_margin_gib * 1073741824.0;
                     std::string kerr;
-                    const int64_t g = tier.shrink_cache_for((int64_t) need, kerr);
-                    if (g >= 0) {
+                    int64_t g = 0; bool shrink_ok = true;
+                    for (int st = 0; st < pipe.n_stages(); ++st) {
+                        std::string sk;
+                        const int64_t gs = pipe.tier(st).shrink_cache_for((int64_t) need, sk);
+                        if (gs < 0) { shrink_ok = false; kerr = sk.empty() ? kerr : sk; g = -1; break; }
+                        g += gs;
+                    }
+                    if (shrink_ok && g >= 0) {
                         kept = true;
+                        int64_t stay = 0; for (int st = 0; st < pipe.n_stages(); ++st) stay += pipe.tier(st).resident();
                         std::fprintf(stderr, "serve: cache kept for a %d-token batch (%lld tail slots out, %lld experts stay)\n",
-                                     dh, (long long) g, (long long) tier.resident());
+                                     dh, (long long) g, (long long) stay);
                     } else if (!kerr.empty()) {
                         std::fprintf(stderr, "serve: keep-cache: %s - releasing the cache\n", kerr.c_str());
                     }
                 }
                 if (!kept) {
-                    tier.release_cache();
+                    for (int st = 0; st < pipe.n_stages(); ++st) pipe.tier(st).release_cache();
                     cache_open = false;
 #if defined(DS41_HAVE_DSPARK)
                     // STRATA_SERVE_DSPARK_EVICT=N (s6, opt-in until measured; 0 = off): a batch of >= N new tokens also
@@ -1559,7 +1566,7 @@ int main(int argc, char ** argv) {
                 dense.release_pass();   // the batch's pass buffers first (open_cache does the same before a seed)
                 if (tier.regrow_cache(kerr) < 0) {
                     std::fprintf(stderr, "serve: keep-cache regrow: %s - re-seeding\n", kerr.c_str());
-                    tier.release_cache();
+                    for (int st = 0; st < pipe.n_stages(); ++st) pipe.tier(st).release_cache();
                     cache_open = false;
                 } else {
                     bias_now = true;
@@ -1698,8 +1705,9 @@ int main(int argc, char ** argv) {
                     continue;
                 }
                 cache_open = true;
+                { int64_t resid = 0; for (int st = 0; st < pipe.n_stages(); ++st) resid += pipe.tier(st).resident();
                 std::fprintf(stderr, "serve: VRAM %.2f GiB free -> %lld experts in VRAM (seed %.2f s)\n", seed_free,
-                             (long long) tier.resident(), seed_s);
+                             (long long) resid, seed_s); }
             }
             if (ok) tier.rebalance_plan();
             tier.reset_stats();
