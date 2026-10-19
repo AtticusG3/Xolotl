@@ -1816,7 +1816,29 @@ bool Ds41Dense::begin_continued(const int * tids, int n, int pos0) {
     if (n < 1 || n > im.NC || pos0 < 0 || pos0 + n > im.cfg.ctx_max) { im.err = "bad pass"; return false; }
     im.pos0 = pos0;
     im.n = n;
+    im.batch = 0;
+    im.span_cap.clear();
     return im.upload_inputs(tids, n, pos0);
+}
+
+bool Ds41Dense::begin_batch_continued(const int * tids, int B, int pos0) {
+    Impl & im = *p_;
+    if (B < 1 || B > im.cfg.prompt_batch || B > im.NC || pos0 < 0 || pos0 + B > im.cfg.ctx_max) {
+        im.err = "bad batch";
+        return false;
+    }
+    if (!im.upload_inputs(tids, B, pos0)) return false;
+    im.pos0 = pos0;
+    im.batch_pos0 = pos0;
+    im.batch = B;
+    im.n = B;
+    im.col0 = 0;
+    const int64_t nb = (B + im.S - 1) / im.S;
+    im.span_cap.assign((size_t) nb, { 0, 0, 0 });
+    for (int64_t i = 0; i < nb; ++i)
+        span_pass_caps(im, pos0 + (int) (i * im.S), (int) std::min<int64_t>(im.S, (int64_t) B - i * im.S),
+                       im.span_cap[(size_t) i].data());
+    return true;
 }
 
 namespace {

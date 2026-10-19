@@ -689,7 +689,7 @@ int main(int argc, char ** argv) {
             if (!one_layer(l)) return false;
         if (pipe.enabled()) {
             if (!ds41_handoff_between_stages(pipe, 0, 1, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, &tok, 1, pos, ferr)) return false;
+            if (!ds41_begin_stage1_continued(pipe, &tok, 1, pos, false, ferr)) return false;
             for (int l = split; l < n_layer; ++l)
                 if (!one_layer(l)) return false;
         }
@@ -729,7 +729,7 @@ int main(int argc, char ** argv) {
             if (!run_pm(l)) return false;
         if (pipe.enabled()) {
             if (!ds41_handoff_between_stages(pipe, 0, m, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, ferr)) return false;
+            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, false, ferr)) return false;
             for (int l = split; l < n_layer; ++l)
                 if (!run_pm(l)) return false;
         }
@@ -853,7 +853,7 @@ int main(int argc, char ** argv) {
             if (!pv_layer(l)) return false;
         if (pipe.enabled()) {
             if (!ds41_handoff_between_stages(pipe, 0, m, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, ferr)) return false;
+            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, false, ferr)) return false;
             for (int l = split_pv; l < n_layer; ++l)
                 if (!pv_layer(l)) return false;
         }
@@ -991,17 +991,35 @@ int main(int argc, char ** argv) {
                 // HALF the width (twice the sweeps over the file tier, the same answer) down to SB, so a tight card
                 // makes a prompt slower instead of failing the request (s13 run8: "prefill failed: graph allocation
                 // failed" on a 21K prompt with Whisper's 2.5 GB resident).
+                Ds41Dense & batch_dense = pipe.enabled() ? pipe.dense(0) : dense;
                 for (;;) {
-                    if (B > dense.columns()) {
-                        if (dense.set_columns(B)) { if (rdev1) rdev1 = dense.routed_dev(); }
-                        else if (B > SB) {
+                    const auto set_cols = [&](int cols) -> bool {
+                        if (!pipe.enabled()) {
+                            if (cols <= dense.columns()) return true;
+                            if (!dense.set_columns(cols)) { ferr = dense.last_error(); return false; }
+                            if (rdev1) rdev1 = dense.routed_dev();
+                            return true;
+                        }
+                        for (int st = 0; st < pipe.n_stages(); ++st) {
+                            if (cols <= pipe.dense(st).columns()) continue;
+                            if (!pipe.dense(st).set_columns(cols)) {
+                                ferr = pipe.dense(st).last_error();
+                                return false;
+                            }
+                        }
+                        if (rdev1) rdev1 = pipe.dense(0).routed_dev();
+                        return true;
+                    };
+                    if (!set_cols(B)) {
+                        if (B > SB) {
                             std::fprintf(stderr, "ds41_generate: %d state columns did not fit (%s) - retrying at %d\n",
-                                         B, dense.last_error().c_str(), std::max(SB, B / 2));
+                                         B, ferr.c_str(), std::max(SB, B / 2));
                             B = std::max(SB, B / 2);
                             continue;
-                        } else { ferr = dense.last_error(); return false; }
+                        }
+                        return false;
                     }
-                    if (dense.begin_batch(ids + c0, B, pos0 + c0)) break;
+                    if (batch_dense.begin_batch(ids + c0, B, pos0 + c0)) break;
                     if (B > SB) {
                         std::fprintf(stderr, "ds41_generate: batch of %d did not fit (%s) - retrying at %d\n",
                                      B, dense.last_error().c_str(), std::max(SB, B / 2));
@@ -1028,7 +1046,7 @@ int main(int argc, char ** argv) {
                 for (int l = 0; l < n_layer; ++l) {
                     if (pipe.enabled() && l == pipe.split_layer) {
                         if (!pipe.sync_handoff(0, B, ferr)) return false;
-                        if (!pipe.dense(1).begin_continued(ids + c0, B, pos0 + c0)) {
+                        if (!pipe.dense(1).begin_batch_continued(ids + c0, B, pos0 + c0)) {
                             ferr = pipe.dense(1).last_error();
                             return false;
                         }
@@ -1118,10 +1136,7 @@ int main(int argc, char ** argv) {
                 for (int l = 0; l < n_layer; ++l) {
                     if (pipe.enabled() && l == pipe.split_layer) {
                         if (!pipe.sync_handoff(0, m, ferr)) return false;
-                        if (!pipe.dense(1).begin_continued(ids + c0, m, pos0 + c0)) {
-                            ferr = pipe.dense(1).last_error();
-                            return false;
-                        }
+                        if (!ds41_begin_stage1_continued(pipe, ids + c0, m, pos0 + c0, false, ferr)) return false;
                         cur_dense = &pipe.dense(1);
                         cur_tier = &pipe.tier(1);
                     }

@@ -29,9 +29,12 @@ inline bool ds41_handoff_between_stages(Ds41Pipeline & pipe, int col0, int n, st
     return pipe.sync_handoff(col0, n, err);
 }
 
-inline bool ds41_begin_stage1_continued(Ds41Pipeline & pipe, const int * tids, int n, int pos0, std::string & err) {
+inline bool ds41_begin_stage1_continued(Ds41Pipeline & pipe, const int * tids, int n, int pos0, bool layer_major_batch,
+                                        std::string & err) {
     if (!pipe.enabled()) return true;
-    if (!pipe.dense(1).begin_continued(tids, n, pos0)) {
+    const bool ok = layer_major_batch ? pipe.dense(1).begin_batch_continued(tids, n, pos0)
+                                      : pipe.dense(1).begin_continued(tids, n, pos0);
+    if (!ok) {
         err = pipe.dense(1).last_error();
         return false;
     }

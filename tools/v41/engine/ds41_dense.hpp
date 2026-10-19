@@ -162,6 +162,8 @@ public:
     bool import_handoff(int col0, int n, const float * src);
     /// begin() without the embedding init graph; state columns must already hold the handoff (import_handoff).
     bool begin_continued(const int * tids, int n, int pos0);
+    /// Layer-major batch after import_handoff: same span_cap / batch fields as begin_batch, no init graph.
+    bool begin_batch_continued(const int * tids, int B, int pos0);
     /// Full dense+KV image for conversation parking (positions [0, positions)).
     bool capture_conversation(int64_t positions, std::vector<uint8_t> & out) const;
     bool restore_conversation(const std::vector<uint8_t> & in);
