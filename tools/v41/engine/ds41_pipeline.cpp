@@ -1,5 +1,7 @@
 #include "ds41_pipeline.hpp"
 
+#include "ds41_geometry.hpp"
+
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
@@ -48,7 +50,7 @@ bool Ds41Pipeline::sync_handoff(int col0, int n, std::string & err) {
     if (stages.size() < 2) return true;
     Ds41Dense & d0 = dense(0);
     Ds41Dense & d1 = dense(1);
-    const size_t need = handoff_bytes(n);
+    const size_t need = handoff_bytes(n) / sizeof(float);
     if (handoff_host.size() < need) handoff_host.resize(need);
     if (!d0.export_handoff(col0, n, handoff_host.data())) {
         err = "export_handoff: " + d0.last_error();
@@ -107,6 +109,18 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
     std::fprintf(stderr, "ds41: layer split at layer %d across GPUs %d and %d\n", split, split_devices[0],
                  split_devices[1]);
     out.split_layer = split;
+    Ds41Geometry Ggeo;
+    std::string gerr;
+    if (!dc_template.engram_dirs.empty()) {
+        GgufModel gm = GgufModel::open(model);
+        gerr = ds41_read_geometry(gm, Ggeo);
+    }
+    auto stage_has_engram = [&](int64_t lo, int64_t hi) -> bool {
+        if (!gerr.empty()) return true;
+        for (int64_t el : Ggeo.engram_layers)
+            if (el >= lo && el < hi) return true;
+        return false;
+    };
     for (int s = 0; s < 2; ++s) {
         Ds41Stage st;
         st.cuda_device = split_devices[(size_t) s];
@@ -119,6 +133,7 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         dc.backend = st.backend;
         dc.layer_lo = st.layer_lo;
         dc.layer_hi = st.layer_hi;
+        if (!dc.engram_dirs.empty() && !stage_has_engram(st.layer_lo, st.layer_hi)) dc.engram_dirs.clear();
         st.dense = std::make_unique<Ds41Dense>();
         if (!st.dense->init(model, dc, err)) return false;
         Ds41MoeConfig mc = mc_template;
@@ -131,7 +146,8 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         if (!st.tier->init(TG, &shared_blobs, mc, err)) return false;
         out.stages.push_back(std::move(st));
     }
-    out.handoff_host.resize(out.handoff_bytes(dc_template.prompt_batch > 0 ? dc_template.prompt_batch : 512));
+    out.handoff_host.resize(
+        out.handoff_bytes(dc_template.prompt_batch > 0 ? dc_template.prompt_batch : 512) / sizeof(float));
     return true;
 }
 

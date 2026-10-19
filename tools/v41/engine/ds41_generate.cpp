@@ -604,18 +604,19 @@ int main(int argc, char ** argv) {
         auto one_layer = [&](int l) -> bool {
             Ds41Dense & d = ds41_dense_for(pipe, l);
             Ds41MoeTier & t = ds41_tier_for(pipe, l);
+            const int stage_end = l < split ? split : n_layer;
             float * rdev = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? d.routed_dev() : nullptr;
             if (file_pred) {
                 for (int k = 1; k <= kFP; ++k) {
-                    int * const pk = fp_ids.data() + ((size_t) (k - 1) * n_layer + (size_t) (l + k < n_layer ? l + k : 0)) * 16;
-                    if (l + k < n_layer && !d.predict(l + k, pk, 16)) std::fill(pk, pk + 16, -1);
-                    if (l + k < n_layer)
-                        for (int i = 0; i < 16; ++i)
-                            if (pk[i] >= 0 && !t.resident(l + k, pk[i]) && !t.in_arena(l + k, pk[i]))
-                                for (int c = 0; c < 3; ++c) fp_cand[k][c] += i < (4 << c);
+                    if (l + k >= stage_end) continue;
+                    int * const pk = fp_ids.data() + ((size_t) (k - 1) * n_layer + (size_t) (l + k)) * 16;
+                    if (!d.predict(l + k, pk, 16)) std::fill(pk, pk + 16, -1);
+                    for (int i = 0; i < 16; ++i)
+                        if (pk[i] >= 0 && !t.resident(l + k, pk[i]) && !t.in_arena(l + k, pk[i]))
+                            for (int c = 0; c < 3; ++c) fp_cand[k][c] += i < (4 << c);
                 }
             }
-            if (advise_ahead > 0 && l + advise_ahead < n_layer) {
+            if (advise_ahead > 0 && l + advise_ahead < stage_end) {
                 int ta_ids[16];
                 if (d.predict(l + advise_ahead, ta_ids, 16)) t.advise_file(l + advise_ahead, ta_ids, advise_top);
             }
@@ -654,15 +655,16 @@ int main(int argc, char ** argv) {
             if (!tok_ok) { ferr = "tier.run failed"; return false; }
             if (dprof) { const double t1 = now_ms(); dp[3] += t1 - ta; ta = t1; }
             const float * rsum = rdev ? nullptr : routed1.data();
-            if (fuse_predict && mc.pf_b > 0 && !mc.cpu_only && l + 1 < n_layer) {
+            if (fuse_predict && mc.pf_b > 0 && !mc.cpu_only && l + 1 < stage_end) {
                 int t16[16];
                 if (spec_top > 0 && spec_ahead > 0) {
                     int ahead[16 * 8];
-                    const int na = std::min(spec_ahead, 8);
+                    const int na = std::max(0, std::min({spec_ahead, 8, stage_end - l - 2}));
                     if (!d.finish_predict_ahead(l, rsum, l + 1, t16, 16, na, ahead)) { ferr = d.last_error(); return false; }
                     if (dprof) { const double t1 = now_ms(); dp[4] += t1 - ta; ta = t1; }
-                    if (spec_l1) t.spec_read(l + 1, t16, std::min(spec_top, 16));
-                    for (int ai = 0; ai < na; ++ai) t.spec_read(l + 2 + ai, ahead + ai * 16, std::min(spec_top, 16));
+                    if (spec_l1 && l + 1 < stage_end) t.spec_read(l + 1, t16, std::min(spec_top, 16));
+                    for (int ai = 0; ai < na; ++ai)
+                        if (l + 2 + ai < stage_end) t.spec_read(l + 2 + ai, ahead + ai * 16, std::min(spec_top, 16));
                     if (dprof) { const double t1 = now_ms(); dp[5] += t1 - ta; ta = t1; }
                 } else if (!d.finish_predict(l, rsum, l + 1, t16, 16)) { ferr = d.last_error(); return false; }
                 for (int i = 0; i < 16; ++i) top16[i] = t16[i];
@@ -762,6 +764,7 @@ int main(int argc, char ** argv) {
         auto pv_layer = [&](int l) -> bool {
             Ds41Dense & d = ds41_dense_for(pipe, l);
             Ds41MoeTier & tr = ds41_tier_for(pipe, l);
+            const int stage_end = l < split_pv ? split_pv : n_layer;
             float * rdev = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? d.routed_dev() : nullptr;
             const bool pf_now = rdev && !no_tier_batch && d3_pf > 0 && m <= Ds41MoeTier::kMaxMulti;
             if (pf_now) {
@@ -788,7 +791,7 @@ int main(int argc, char ** argv) {
             // 7.9 ms/token on the decode thread).  A wrong guess costs SSD bandwidth only.
             static const int d3_spec = std::getenv("STRATA_D3_SPEC") ? std::atoi(std::getenv("STRATA_D3_SPEC")) : 0;
             static const int d3_spec_ahead = std::getenv("STRATA_D3_SPEC_AHEAD") ? std::atoi(std::getenv("STRATA_D3_SPEC_AHEAD")) : 2;
-            if (rdev && !no_tier_batch && d3_spec > 0 && m <= Ds41MoeTier::kMaxMulti && l + d3_spec_ahead < n_layer) {
+            if (rdev && !no_tier_batch && d3_spec > 0 && m <= Ds41MoeTier::kMaxMulti && l + d3_spec_ahead < stage_end) {
                 pv_pred.resize((size_t) m * 16);
                 if (d.predict_multi(l + d3_spec_ahead, pv_pred.data())) {
                     pv_score.clear();

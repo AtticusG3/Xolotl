@@ -4,8 +4,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 
 namespace strata::v41 {
 
@@ -86,53 +84,6 @@ bool Ds41ConversationServe::unpack(const strata::core::SavedConversation & saved
     return true;
 }
 
-void Ds41ConversationServe::write_disk(const Ds41ConvImage & img, size_t slot_index) {
-    if (disk_root_.empty()) return;
-    std::error_code ec;
-    std::filesystem::create_directories(disk_root_, ec);
-    const std::string path = disk_root_ + "/ds41_conv_" + std::to_string(slot_index) + ".bin";
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return;
-    const int32_t n = (int32_t) img.ids.size();
-    f.write(reinterpret_cast<const char *>(&n), sizeof n);
-    f.write(reinterpret_cast<const char *>(img.ids.data()), (std::streamsize) (n * sizeof(int32_t)));
-    const int32_t ns = (int32_t) img.stage0.size();
-    f.write(reinterpret_cast<const char *>(&ns), sizeof ns);
-    if (ns > 0) f.write(reinterpret_cast<const char *>(img.stage0.data()), ns);
-    for (const auto & st : img.later_stages) {
-        const int32_t sz = (int32_t) st.size();
-        f.write(reinterpret_cast<const char *>(&sz), sizeof sz);
-        if (sz > 0) f.write(reinterpret_cast<const char *>(st.data()), sz);
-    }
-}
-
-bool Ds41ConversationServe::read_disk(size_t slot_index, Ds41ConvImage & out) const {
-    if (disk_root_.empty()) return false;
-    const std::string path = disk_root_ + "/ds41_conv_" + std::to_string(slot_index) + ".bin";
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    int32_t n = 0;
-    f.read(reinterpret_cast<char *>(&n), sizeof n);
-    if (n < 0 || n > 1 << 26) return false;
-    out.ids.resize((size_t) n);
-    f.read(reinterpret_cast<char *>(out.ids.data()), (std::streamsize) (n * sizeof(int32_t)));
-    int32_t ns = 0;
-    f.read(reinterpret_cast<char *>(&ns), sizeof ns);
-    if (ns < 0) return false;
-    out.stage0.resize((size_t) ns);
-    if (ns > 0) f.read(reinterpret_cast<char *>(out.stage0.data()), ns);
-    out.later_stages.clear();
-    while (f.peek() != EOF) {
-        int32_t sz = 0;
-        f.read(reinterpret_cast<char *>(&sz), sizeof sz);
-        if (sz < 0) return false;
-        std::vector<uint8_t> st((size_t) sz);
-        if (sz > 0) f.read(reinterpret_cast<char *>(st.data()), sz);
-        out.later_stages.push_back(std::move(st));
-    }
-    return true;
-}
-
 bool Ds41ConversationServe::park_live(Ds41Pipeline & pipe, const std::vector<int> & live_ids, int snap_len,
                                       int64_t positions, const std::vector<float> & snap_logits, std::string & err) {
     if (!enabled() || snap_len < 1 || (int64_t) live_ids.size() < snap_len) return true;
@@ -165,7 +116,6 @@ bool Ds41ConversationServe::park_live(Ds41Pipeline & pipe, const std::vector<int
         std::fprintf(stderr, "strata serve: conversation cache: skip parking (put refused)\n");
         return true;
     }
-    write_disk(img, cache_.size());
     std::fprintf(stderr,
                  "strata serve: conversation cache: parked %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu "
                  "snapshot_bytes=%zu reused_kv_bytes=0\n",

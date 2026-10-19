@@ -6,7 +6,6 @@
 #include "strata/core/conversation_memory.hpp"
 
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <vector>
 
@@ -49,14 +48,11 @@ private:
     strata::core::ConversationCache cache_;
     int prompt_every_ = 0;
     std::string disk_root_;
-    std::deque<Ds41ConvImage> disk_spill_;
 
     bool capture_image(Ds41Pipeline & pipe, int64_t positions, Ds41ConvImage & out, std::string & err) const;
     bool restore_image(Ds41Pipeline & pipe, const Ds41ConvImage & in, std::string & err) const;
     strata::core::SavedConversation pack(const Ds41ConvImage & img) const;
     bool unpack(const strata::core::SavedConversation & saved, Ds41ConvImage & out) const;
-    void write_disk(const Ds41ConvImage & img, size_t slot_index);
-    bool read_disk(size_t slot_index, Ds41ConvImage & out) const;
 };
 
 }  // namespace strata::v41

@@ -1319,7 +1319,10 @@ bool Ds41MoeTier::init(const Ds41MoeGeom& geom, Ds41BlobSource* blobs, const Ds4
     err = "this build has no CUDA tier (compiled without DS4_MOE_CUDA); set cfg.cpu_only";
     return false;
 #else
-    if (cfg.cuda_device > 0) cudaSetDevice(cfg.cuda_device);
+    if (cfg.cuda_device >= 0 && cudaSetDevice(cfg.cuda_device) != cudaSuccess) {
+        err = "cudaSetDevice(" + std::to_string(cfg.cuda_device) + ") failed";
+        return false;
+    }
     Gpu& gp = *(im_->gpu = std::unique_ptr<Gpu>(new Gpu()));
     gp.arena.blob = im_->blob;
     gp.arena.n_layers = geom.n_layers;

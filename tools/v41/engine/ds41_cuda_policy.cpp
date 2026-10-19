@@ -24,7 +24,10 @@ bool ds41_min_visible_cuda_cc(int& min_cc_encoded, std::string& err) {
     int min_cc = 100;
     for (int d = 0; d < nd; ++d) {
         cudaDeviceProp prop{};
-        if (cudaGetDeviceProperties(&prop, d) != cudaSuccess) continue;
+        if (cudaGetDeviceProperties(&prop, d) != cudaSuccess) {
+            err = "cudaGetDeviceProperties failed";
+            return false;
+        }
         min_cc = std::min(min_cc, strata::cuda_cc_encode(prop.major, prop.minor));
     }
     min_cc_encoded = min_cc;
@@ -38,7 +41,10 @@ void ds41_apply_mmq_cc_policy(bool backend_is_cuda, bool& chunk_mmq) {
     if (force && force[0] == '1') return;
     int min_cc = 100;
     std::string err;
-    if (!ds41_min_visible_cuda_cc(min_cc, err)) return;
+    if (!ds41_min_visible_cuda_cc(min_cc, err)) {
+        chunk_mmq = false;
+        return;
+    }
     if (!strata::cuda_cc_below_mmq_tensor_cores(min_cc)) return;
     std::fprintf(stderr,
                  "ds41_generate: compute capability %d.%d has no int8 tensor cores; "

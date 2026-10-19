@@ -39,10 +39,10 @@ def main() -> int:
     x_fp8 = x.clone()
     K.act_quant(x_fp8, block_size=128, scale_fmt="ue8m0", inplace=True)
     x_fp4e = x.clone()
-    # Match ds41_dense FP4_E4M3_16 / FP4_POW2_32 (block size 16, not 32).
+    # Match ds41_dense FP4_E4M3_16 (block size 16) / FP4_POW2_32 (block size 32).
     K.fp4_act_quant(x_fp4e, block_size=16, inplace=True, scale_dtype=torch.float8_e4m3fn)
     x_fp4p = x.clone()
-    K.fp4_act_quant(x_fp4p, block_size=16, inplace=True, scale_dtype=torch.float8_e8m0fnu)
+    K.fp4_act_quant(x_fp4p, block_size=32, inplace=True, scale_dtype=torch.float8_e8m0fnu)
     for name, t in [("x", x0), ("fp8", x_fp8), ("fp4e", x_fp4e), ("fp4p", x_fp4p)]:
         path = os.path.join(args.out_dir, f"{name}.f32")
         t.detach().cpu().numpy().astype(np.float32).tofile(path)
