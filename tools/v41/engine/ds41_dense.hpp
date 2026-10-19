@@ -56,6 +56,8 @@ struct Ds41DenseConfig {
     /// --serve: start with max_pass (S) state columns and let set_columns() grow them for a layer-major batch and give
     /// them back after it (the prompt_batch columns are ~2.6 GiB at 8192 - expert slots while decoding).
     bool    elastic_cols = false;
+    int64_t layer_lo = 0;   ///< layer split: first layer this instance runs (inclusive)
+    int64_t layer_hi = -1;  ///< exclusive end; -1 = all layers in the file
 };
 
 class Ds41Dense {
@@ -149,6 +151,20 @@ public:
     bool snapshot(int pos);
     bool restore();
     int snapshot_pos() const;
+    /// Layer split: only run and retain KV for layers in [layer_lo, layer_hi).  head/logits require layer_hi == n_layer().
+    void set_layer_range(int64_t layer_lo, int64_t layer_hi);
+    int64_t layer_lo() const;
+    int64_t layer_hi() const;
+    bool owns_head() const;
+    /// PCIe handoff between pipeline stages: per-column x_state [D,HC] then pre_state [HC], column-major (n columns).
+    size_t handoff_bytes_per_column() const;
+    bool export_handoff(int col0, int n, float * dst) const;
+    bool import_handoff(int col0, int n, const float * src);
+    /// begin() without the embedding init graph; state columns must already hold the handoff (import_handoff).
+    bool begin_continued(const int * tids, int n, int pos0);
+    /// Full dense+KV image for conversation parking (positions [0, positions)).
+    bool capture_conversation(int64_t positions, std::vector<uint8_t> & out) const;
+    bool restore_conversation(const std::vector<uint8_t> & in);
     /// Serve: keep a conversation through an UNRELATED request.  An unrelated request writes its own positions from 0, so
     /// it overwrites the start of every position-indexed cache (compressed KV, indexer keys) and the snapshot rings.
     /// park(n) copies the snapshot rings + the first n positions' rows of those caches (and their spare rows) to host

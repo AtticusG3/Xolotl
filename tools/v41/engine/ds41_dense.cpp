@@ -117,6 +117,7 @@ struct Ds41Dense::Impl {
     std::unique_ptr<GgufModel> model;
     std::vector<int64_t> layers;          // blocks in the file (0..nl-1)
     int64_t nl = 0;
+    int64_t layer_lo = 0, layer_hi = 0;   // [layer_lo, layer_hi) this instance runs and holds KV for
     ggml_backend_t backend = nullptr;
     bool own_backend = false, cpu = true;
     WStore w;
@@ -257,7 +258,20 @@ static bool load_weights(Ds41Dense::Impl & im, std::string & err) {
         return t;
     };
     // routed experts never reach ggml (PTQ1_0 = 143 is past GGML_TYPE_COUNT); the I32 maps are read by the geometry
-    auto skip = [&](const std::string & n) { return is_routed(n) || n == "token_embd.weight"; };
+    auto blk_layer = [](const std::string & n) -> int64_t {
+        if (n.rfind("blk.", 0) != 0) return -1;
+        const size_t dot = n.find('.', 4);
+        if (dot == std::string::npos) return -1;
+        return std::atoll(n.substr(4, dot - 4).c_str());
+    };
+    auto in_dense_range = [&](const std::string & n) {
+        if (n == "token_embd.weight") return im.layer_lo == 0;
+        if (n == "output.weight" || n == "output_norm.weight") return im.layer_hi == im.nl;
+        const int64_t l = blk_layer(n);
+        if (l < 0) return true;
+        return l >= im.layer_lo && l < im.layer_hi;
+    };
+    auto skip = [&](const std::string & n) { return is_routed(n) || n == "token_embd.weight" || !in_dense_range(n); };
     if (im.cpu) {
         for (size_t s = 0; s < model.size(); ++s) {
             const GgufFile & sh = model.shard(s);
@@ -1021,6 +1035,9 @@ bool Ds41Dense::init(const std::string & path, const Ds41DenseConfig & cfg, std:
     for (size_t i = 0; i < im.layers.size(); ++i)
         if (im.layers[i] != (int64_t) i) { err = "the file's blocks must be 0..k"; return false; }
     im.nl = (int64_t) im.layers.size();
+    im.layer_lo = std::max<int64_t>(0, cfg.layer_lo);
+    im.layer_hi = cfg.layer_hi < 0 ? im.nl : std::min<int64_t>(cfg.layer_hi, im.nl);
+    if (im.layer_lo >= im.layer_hi) { err = "invalid layer range"; return false; }
     const Ds41Geometry & G = im.g;
     im.D = G.n_embd; im.HC = G.hc; im.DH = G.d_head; im.DHR = G.d_rope; im.NH = G.n_head; im.OG = G.o_groups;
     im.OL = G.o_lora; im.OGD = G.n_head * G.d_head / G.o_groups; im.RQ = G.r_q; im.SWA = G.n_swa;
@@ -1055,6 +1072,7 @@ bool Ds41Dense::init(const std::string & path, const Ds41DenseConfig & cfg, std:
     for (int64_t l = 0; l < im.nl; ++l) {
         auto & L = im.ly[(size_t) l];
         L.ratio = G.ratio[(size_t) l];
+        if (l < im.layer_lo || l >= im.layer_hi) continue;
         L.kv_src = G.is_kv_source(l);
         L.idx_src = G.is_index_source(l);
         L.cand_src = l == G.cand_layer;
@@ -1627,6 +1645,7 @@ bool Ds41Dense::finish_predict_ahead(int il, const float * routed_sum, int next_
 }
 
 bool Ds41Dense::logits(int row0, int nrows, float * out) {
+    if (!owns_head()) { p_->err = "logits on a stage without the head"; return false; }
     Impl & im = *p_;
     if (row0 < 0 || nrows < 1 || row0 + nrows > im.n) { im.err = "bad logits rows"; return false; }
     std::vector<uint8_t> meta(ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false));
@@ -1746,5 +1765,133 @@ bool Ds41Dense::read_sel(int il, std::vector<int> & sel, std::vector<float> & ma
             mask.push_back(m[(size_t) (t * im.ITOP + j)]);
         }
     *K = (int) k;
+    return true;
+}
+
+void Ds41Dense::set_layer_range(int64_t layer_lo, int64_t layer_hi) {
+    p_->layer_lo = layer_lo;
+    p_->layer_hi = layer_hi < 0 ? p_->nl : layer_hi;
+}
+
+int64_t Ds41Dense::layer_lo() const { return p_->layer_lo; }
+int64_t Ds41Dense::layer_hi() const { return p_->layer_hi; }
+bool Ds41Dense::owns_head() const { return p_->layer_hi == p_->nl; }
+
+size_t Ds41Dense::handoff_bytes_per_column() const {
+    const Impl & im = *p_;
+    return (size_t) (im.D * im.HC + im.HC) * sizeof(float);
+}
+
+bool Ds41Dense::export_handoff(int col0, int n, float * dst) const {
+    const Impl & im = *p_;
+    if (!dst || col0 < 0 || n < 1 || col0 + n > im.NC) return false;
+    const size_t col_x = (size_t) (im.D * im.HC) * sizeof(float);
+    const size_t col_p = (size_t) im.HC * sizeof(float);
+    for (int c = 0; c < n; ++c) {
+        ggml_backend_tensor_get(im.x_state, dst, (size_t) (col0 + c) * col_x, col_x);
+        dst += (im.D * im.HC);
+        ggml_backend_tensor_get(im.pre_state, dst, (size_t) (col0 + c) * col_p, col_p);
+        dst += im.HC;
+    }
+    return true;
+}
+
+bool Ds41Dense::import_handoff(int col0, int n, const float * src) {
+    Impl & im = *p_;
+    if (!src || col0 < 0 || n < 1 || col0 + n > im.NC) return false;
+    const size_t col_x = (size_t) (im.D * im.HC) * sizeof(float);
+    const size_t col_p = (size_t) im.HC * sizeof(float);
+    for (int c = 0; c < n; ++c) {
+        ggml_backend_tensor_set(im.x_state, src, (size_t) (col0 + c) * col_x, col_x);
+        src += (im.D * im.HC);
+        ggml_backend_tensor_set(im.pre_state, src, (size_t) (col0 + c) * col_p, col_p);
+        src += im.HC;
+    }
+    ggml_backend_synchronize(im.backend);
+    return true;
+}
+
+bool Ds41Dense::begin_continued(const int * tids, int n, int pos0) {
+    Impl & im = *p_;
+    if (n < 1 || n > im.NC || pos0 < 0 || pos0 + n > im.cfg.ctx_max) { im.err = "bad pass"; return false; }
+    im.pos0 = pos0;
+    im.n = n;
+    return im.upload_inputs(tids, n, pos0);
+}
+
+namespace {
+constexpr char kConvMagic[] = "DS41CONV1";
+void append_bytes(std::vector<uint8_t> & out, const void * p, size_t n) {
+    const auto * b = static_cast<const uint8_t *>(p);
+    out.insert(out.end(), b, b + n);
+}
+}  // namespace
+
+bool Ds41Dense::capture_conversation(int64_t positions, std::vector<uint8_t> & out) const {
+    Impl & im = *const_cast<Impl *>(p_.get());
+    if (positions < 1 || im.snap_pos < 0) return false;
+    ggml_backend_synchronize(im.backend);
+    out.clear();
+    append_bytes(out, kConvMagic, 8);
+    const int64_t lo = im.layer_lo, hi = im.layer_hi;
+    append_bytes(out, &lo, sizeof lo);
+    append_bytes(out, &hi, sizeof hi);
+    append_bytes(out, &positions, sizeof positions);
+    append_bytes(out, &im.snap_pos, sizeof im.snap_pos);
+    auto put_tensor = [&](ggml_tensor * t, size_t off, size_t n) {
+        if (!t || n == 0) return;
+        const size_t o = out.size();
+        out.resize(o + n);
+        ggml_backend_tensor_get(t, out.data() + o, off, n);
+    };
+    for (auto & L : im.ly) {
+        for (ggml_tensor * t : { L.raw_snap, L.st_kv_snap, L.st_sc_snap })
+            if (t) put_tensor(t, 0, ggml_nbytes(t));
+        for (ggml_tensor * t : { L.comp, L.idxk }) {
+            if (!t) continue;
+            const int64_t rows = t->ne[1];
+            const int64_t n = std::min<int64_t>(rows - 1, positions + 1);
+            put_tensor(t, 0, (size_t) n * t->nb[1]);
+            put_tensor(t, (size_t) (rows - 1) * t->nb[1], t->nb[1]);
+        }
+    }
+    return true;
+}
+
+bool Ds41Dense::restore_conversation(const std::vector<uint8_t> & in) {
+    if (in.size() < 8 + 4 * sizeof(int64_t) || std::memcmp(in.data(), kConvMagic, 8) != 0) return false;
+    Impl & im = *p_;
+    size_t o = 8;
+    int64_t lo = 0, hi = 0, positions = 0, snap = 0;
+    std::memcpy(&lo, in.data() + o, sizeof lo); o += sizeof lo;
+    std::memcpy(&hi, in.data() + o, sizeof hi); o += sizeof hi;
+    std::memcpy(&positions, in.data() + o, sizeof positions); o += sizeof positions;
+    std::memcpy(&snap, in.data() + o, sizeof snap); o += sizeof snap;
+    if (lo != im.layer_lo || hi != im.layer_hi) return false;
+    auto get_tensor = [&](ggml_tensor * t, size_t n) -> bool {
+        if (!t) return n == 0;
+        if (o + n > in.size()) return false;
+        ggml_backend_tensor_set(t, in.data() + o, 0, n);
+        o += n;
+        return true;
+    };
+    for (auto & L : im.ly) {
+        for (ggml_tensor * t : { L.raw_snap, L.st_kv_snap, L.st_sc_snap })
+            if (!get_tensor(t, t ? ggml_nbytes(t) : 0)) return false;
+        for (ggml_tensor * t : { L.comp, L.idxk }) {
+            if (!t) continue;
+            const int64_t rows = t->ne[1];
+            const int64_t n = std::min<int64_t>(rows - 1, positions + 1);
+            if (!get_tensor(t, (size_t) n * t->nb[1])) return false;
+            if (!get_tensor(t, t->nb[1])) return false;
+        }
+        if (L.raw_snap) ggml_backend_tensor_copy(L.raw_snap, L.raw);
+        if (L.st_kv_snap) {
+            ggml_backend_tensor_copy(L.st_kv_snap, L.st_kv);
+            ggml_backend_tensor_copy(L.st_sc_snap, L.st_sc);
+        }
+    }
+    im.snap_pos = (int) snap;
+    ggml_backend_synchronize(im.backend);
     return true;
 }
