@@ -138,10 +138,10 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         if (!st.dense->init(model, dc, err)) return false;
         Ds41MoeConfig mc = mc_template;
         mc.cuda_device = st.cuda_device;
-        mc.arena_gib = mc.arena_gib / 2.0;
-        mc.max_arena_gib = mc.max_arena_gib / 2.0;
-        if (mc.slots > 0) mc.slots = (mc.slots + 1) / 2;
-        if (!mc.cpu_only && mc.slots <= 0) mc.slot_gib = free_vram_gib(st.backend, vram_margin_gib);
+        if (!mc.cpu_only && mc.slots <= 0) {
+            const double share = (double) (st.layer_hi - st.layer_lo) / (double) TG.n_layers;
+            mc.slot_gib = free_vram_gib(st.backend, vram_margin_gib) * std::max(0.35, share);
+        }
         st.tier = std::make_unique<Ds41MoeTier>();
         if (!st.tier->init(TG, &shared_blobs, mc, err)) return false;
         out.stages.push_back(std::move(st));

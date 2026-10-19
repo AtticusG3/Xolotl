@@ -51,6 +51,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <iostream>
 #include <mutex>
@@ -408,7 +409,8 @@ int main(int argc, char ** argv) {
     const Ds41MoeGeom & TG = src.geom();
     Ds41MoeConfig mc;
     mc.cpu_only = a.experts == "cpu" || (be && ggml_backend_is_cpu(be));
-    mc.slots = a.slots > 0 ? a.slots : TG.n_layers * TG.n_experts;
+    // slots=0 sizes the VRAM cache from free GiB at seed time (slot_gib); the full expert count made the byte budget huge.
+    mc.slots = a.slots > 0 ? a.slots : 0;
     mc.slot_gib = 0.0;
     mc.pcie_frac = a.pcie;
     mc.tier_batch_pcie = a.tier_batch_pcie;
@@ -706,6 +708,7 @@ int main(int argc, char ** argv) {
     auto pass_m = [&](const int * toks, int m, int pos) -> bool {
         mids.resize((size_t) m * top_k);
         mw.resize((size_t) m * top_k);
+        double t0 = now_ms();
         if (!pipe.dense(0).begin(toks, m, pos)) { ferr = pipe.dense(0).last_error(); return false; }
         const int split = ds41_split_at(pipe, n_layer);
         auto run_pm = [&](int l) -> bool {
@@ -714,6 +717,9 @@ int main(int argc, char ** argv) {
             float * rdev = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? d.routed_dev() : nullptr;
             const float * fn = nullptr;
             if (!d.attn_router(l, mids.data(), mw.data(), &fn)) { ferr = d.last_error(); return false; }
+            const double t1 = now_ms();
+            fd_dense += t1 - t0;
+            t0 = t1;
             for (int ti = 0; ti < m; ++ti) {
                 const bool ok = rdev ? tr.run_to_dev(l, mids.data() + (size_t) ti * top_k, mw.data() + (size_t) ti * top_k,
                                                      fn + (size_t) ti * n_embd, rdev + (size_t) ti * n_embd)
@@ -722,7 +728,11 @@ int main(int argc, char ** argv) {
                 if (!ok) { ferr = "tier.run failed"; return false; }
                 if (!rdev) std::copy(routed1.begin(), routed1.end(), crouted_m.begin() + (size_t) ti * n_embd);
             }
+            const double t2 = now_ms();
+            fd_tier += t2 - t1;
+            t0 = t2;
             if (!d.finish(l, rdev ? nullptr : crouted_m.data())) { ferr = d.last_error(); return false; }
+            t0 = now_ms();
             return true;
         };
         for (int l = 0; l < split; ++l)
@@ -910,11 +920,14 @@ int main(int argc, char ** argv) {
                          (now_ms() - ti) / 1000.0);
         }
 #endif
-        const double min_gib = 1.0;
+        const double min_gib = 0.25;
         const bool explicit_slots = a.slots > 0;
         const double ts = now_ms();
         for (int st = 0; st < pipe.n_stages(); ++st) {
             ggml_backend_t st_be = pipe.stages[(size_t) st].backend;
+#ifdef STRATA_ENABLE_CUDA
+            cudaSetDevice(pipe.stages[(size_t) st].cuda_device);
+#endif
             size_t fr = 0, tot = 0;
             ggml_backend_dev_memory(ggml_backend_get_device(st_be), &fr, &tot);
             const double free_gib = fr / 1073741824.0;
@@ -1479,7 +1492,11 @@ int main(int argc, char ** argv) {
                 int last_rows = 1;
                 for (int i = 0; i < dh; ) {
                     const int m = std::min(pass_max, dh - i);
-                    if (!(m == 1 ? step(ids[(size_t) (reused + i)], reused + i) : pass_m(ids.data() + reused + i, m, reused + i))) return false;
+                    if (m == 1) {
+                        const double ts0 = now_ms();
+                        if (!step(ids[(size_t) (reused + i)], reused + i)) return false;
+                        fd_dense += now_ms() - ts0;
+                    } else if (!pass_m(ids.data() + reused + i, m, reused + i)) return false;
                     if (!capture_tail(delta, i, m, 0)) return false;   // this pass's rows, before the next pass replaces them
                     const int before = i;
                     i += m;
@@ -1498,8 +1515,17 @@ int main(int argc, char ** argv) {
             // runs.  This is what lets a big --prompt-batch stay OPT-IN: the engine takes what is actually free.
             pb_cap = PB;
             if (!by_step && dh >= 2 && PB > 1 && !mc.cpu_only) {
-                size_t frb = 0, totb = 0;
-                ggml_backend_dev_memory(ggml_backend_get_device(be), &frb, &totb);
+                size_t frb = std::numeric_limits<size_t>::max(), totb = 0;
+                for (int st = 0; st < pipe.n_stages(); ++st) {
+#ifdef STRATA_ENABLE_CUDA
+                    cudaSetDevice(pipe.stages[(size_t) st].cuda_device);
+#endif
+                    size_t fr = 0, tot = 0;
+                    ggml_backend_dev_memory(ggml_backend_get_device(pipe.stages[(size_t) st].backend), &fr, &tot);
+                    frb = std::min(frb, fr);
+                    totb = std::max(totb, tot);
+                }
+                if (frb == std::numeric_limits<size_t>::max()) frb = 0;
                 // The layer-major batch's own VRAM, CALIBRATED on four traced points (STRATA_VRAM_TRACE=1, s13
                 // run9/run13/run14, a 4 GiB foreign process): free 9.28 GiB with B=8192 failed, free 9.26 with
                 // B=5210 passed, free 5.92 with B=2411 failed, a free card with B=8192 passed - all four fit
