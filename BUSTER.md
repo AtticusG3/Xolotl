@@ -39,6 +39,8 @@ cd /opt/xolotl/build-buster
 ctest -R 'test_cuda_cc_policy|test_ds41_pipeline|test_ds41_geometry' --output-on-failure
 ```
 
+`test_ds41_geometry` **skips** (exit 77) when no GGUF is given; set `DS41_TEST_GGUF=/path/to/V41-GSQ-1017.gguf` to run the full gate on buster.
+
 `test_ds41_ops` is built by ninja but **not** registered in ctest (it needs reference `.f32` files on disk).
 
 ### `test_ds41_ops` reference files
