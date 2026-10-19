@@ -215,6 +215,13 @@ bool Ds41DSpark::Impl::load(std::string & e) {
     if (cfg.shared_head) {
         const ggml_tensor * h = cfg.shared_head;
         if (h->ne[0] != (int64_t) out->shape[0] || h->ne[1] != (int64_t) out->shape[1]) { e = "shared_head: shape differs from output.weight"; return false; }
+        if (!h->buffer) { e = "shared_head: weight has no device buffer"; return false; }
+        const ggml_backend_buffer_type_t head_buft = ggml_backend_buffer_get_type(h->buffer);
+        const ggml_backend_buffer_type_t dspark_buft = ggml_backend_get_default_buffer_type(be);
+        if (head_buft != dspark_buft) {
+            e = "shared_head is not on the DSpark backend (use ds41_head_dense's backend for layer-split)";
+            return false;
+        }
         w["output.weight"] = cfg.shared_head;
     }
     size_t se = 0;

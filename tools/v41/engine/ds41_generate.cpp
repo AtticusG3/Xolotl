@@ -909,16 +909,29 @@ int main(int argc, char ** argv) {
 #if defined(DS41_HAVE_DSPARK)
         if (dsp_path && !dsp) {
             Ds41DSparkConfig sc;
-            sc.backend = pipe.stages[0].backend;
+            // Layer split: the trunk head (shared output.weight) lives on the last stage; DSpark must run there too.
+            sc.backend = dense.backend();
             sc.sidecar = dsp_path;
             sc.main_gguf = a.model;
             sc.max_append = 16;
             if (!std::getenv("STRATA_DSPARK_OWN_HEAD")) sc.shared_head = dense.weight("output.weight");   // -0.7 GB
+#ifdef STRATA_ENABLE_CUDA
+            if (pipe.enabled()) cudaSetDevice(pipe.stages[(size_t) (pipe.n_stages() - 1)].cuda_device);
+#endif
             dsp = std::make_unique<Ds41DSpark>();
             const double ti = now_ms();
-            if (!dsp->init(sc, err)) { err = "DSpark init: " + err; return false; }
-            std::fprintf(stderr, "\nDSpark: %s, %.2f GB of weights on the card (%.1f s)", dsp_path, dsp->weight_bytes() / 1e9,
-                         (now_ms() - ti) / 1000.0);
+            if (!dsp->init(sc, err)) {
+                if (a.serve) {
+                    std::fprintf(stderr, "serve: DSpark disabled (%s) — decoding without drafts\n", err.c_str());
+                    dsp.reset();
+                } else {
+                    err = "DSpark init: " + err;
+                    return false;
+                }
+            } else {
+                std::fprintf(stderr, "\nDSpark: %s, %.2f GB of weights on the card (%.1f s)", dsp_path, dsp->weight_bytes() / 1e9,
+                             (now_ms() - ti) / 1000.0);
+            }
         }
 #endif
         const double min_gib = 0.25;
@@ -1417,8 +1430,8 @@ int main(int argc, char ** argv) {
             const int delta = total - reused;
             int sp_tail = 0;   // DSpark: the last new prompt tokens, fed by pass_v (seeds the window)
 #if defined(DS41_HAVE_DSPARK)
-            if (dsp_path) {
-                if (!(reused > 0 && reused == dsp_next) && dsp) dsp->reset();
+            if (dsp) {
+                if (!(reused > 0 && reused == dsp_next)) dsp->reset();
                 dsp_next = -1;
                 sp_tail = std::min(128, delta);
             }
@@ -1608,7 +1621,7 @@ int main(int argc, char ** argv) {
             int sp_ids[5] = {0}, sp_tmp[5];
             float sp_conf[5];
 #if defined(DS41_HAVE_DSPARK)
-            if (ok && sp_tail > 0) {   // the tail through pass_v (chunks of <= 16), the cache open; routing as the passes
+            if (ok && dsp && sp_tail > 0) {   // the tail through pass_v (chunks of <= 16), the cache open; routing as the passes
                 const double to0 = now_ms();
                 if (defer_vram && !cache_open) {
                     if (!open_cache()) { ferr = "VRAM seed failed: " + err; ok = false; }
