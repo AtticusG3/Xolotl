@@ -1584,9 +1584,18 @@ int main(int argc, char ** argv) {
             bcap_n = 0;
             if (kept) {   // the batch is done: the tail slots back (exactly the evicted experts), decode biases on
                 std::string kerr;
-                dense.release_pass();   // the batch's pass buffers first (open_cache does the same before a seed)
-                if (tier.regrow_cache(kerr) < 0) {
-                    std::fprintf(stderr, "serve: keep-cache regrow: %s - re-seeding\n", kerr.c_str());
+                for (int st = 0; st < pipe.n_stages(); ++st) pipe.dense(st).release_pass();
+                bool regrow_hard_fail = false;
+                for (int st = 0; st < pipe.n_stages(); ++st) {
+                    std::string sk;
+                    if (pipe.tier(st).regrow_cache(sk) < 0) {
+                        std::fprintf(stderr, "serve: keep-cache regrow stage %d: %s\n", st, sk.c_str());
+                        regrow_hard_fail = true;
+                        kerr = sk;
+                    }
+                }
+                if (regrow_hard_fail) {
+                    std::fprintf(stderr, "serve: keep-cache regrow hard-fail - re-seeding\n");
                     for (int st = 0; st < pipe.n_stages(); ++st) pipe.tier(st).release_cache();
                     cache_open = false;
                 } else {
