@@ -74,6 +74,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 # (b) 3-stage: early layers + head + DSpark on 3090, rest on V100s (example split 9 / 25):
 # --head-device 0 --stage-devices 0,1,2 --layer-split 9,25
 # Optional per-stage PCIe: --stage-pcie 0.55,0.25,0.25
+# At load: handoff lines like "handoff stage 0 -> 1 (GPU 0 -> 1): pinned-host"
+# STRATA_SELFTEST_HANDOFF=1 round-trips one column across every boundary (fails fast if broken)
+# STRATA_BUILD_TYPE=RelWithDebInfo bash tools/buster/cmake-buster.sh ...  # gdb-friendly build
 export STRATA_BUILD_DIR=/opt/xolotl/build-buster
 python3 tools/v41/serve/serve_ds41.py --engine strata --config tools/v41/serve/strata-buster-ds41-1017.json --port 8150
 ```

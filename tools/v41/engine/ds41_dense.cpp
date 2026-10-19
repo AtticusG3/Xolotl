@@ -165,6 +165,16 @@ struct Ds41Dense::Impl {
     std::vector<ParkedRows> parked;     // park(): host copies of the snapshot rings + the cache rows an unrelated request overwrites
     int parked_pos = -1;
     std::vector<Layer> ly;
+    std::vector<int64_t> shadow_layers;
+
+    bool owns_layer(int64_t l) const {
+        return l >= layer_lo && l < layer_hi;
+    }
+    bool active_layer(int64_t l) const {
+        if (owns_layer(l)) return true;
+        for (int64_t s : shadow_layers) if (s == l) return true;
+        return false;
+    }
 
     // ---- per-pass inputs (ictx / ibuf), uploaded by begin()
     ggml_context * ictx = nullptr;
@@ -963,8 +973,12 @@ static bool alloc_cols(Ds41Dense::Impl & im, int64_t NC, std::string & err) {
     im.o_wts = ggml_new_tensor_2d(c, GGML_TYPE_F32, im.NU, NC);
     im.routed = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, NC);
     im.cand = ggml_new_tensor_2d(c, GGML_TYPE_I32, im.CB, NC);
-    for (auto & L : im.ly)
-        if (L.idx_src) { L.sel = ggml_new_tensor_2d(c, GGML_TYPE_I32, im.ITOP, NC); L.selm = ggml_new_tensor_2d(c, GGML_TYPE_F32, im.ITOP, NC); }
+    for (int64_t l = 0; l < im.nl; ++l) {
+        auto & L = im.ly[(size_t) l];
+        if (!L.idx_src) continue;
+        L.sel = ggml_new_tensor_2d(c, GGML_TYPE_I32, im.ITOP, NC);
+        L.selm = ggml_new_tensor_2d(c, GGML_TYPE_F32, im.ITOP, NC);
+    }
     im.i_emb = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, NC);
     im.i_pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, NC);
     im.i_widx = ggml_new_tensor_1d(c, GGML_TYPE_I32, im.SWA * NC);
@@ -1076,12 +1090,13 @@ bool Ds41Dense::init(const std::string & path, const Ds41DenseConfig & cfg, std:
     if (!load_weights(im, err)) return false;
     if (!cfg.head_only && !cfg.engram_dirs.empty() && !im.engram.open(G, cfg.engram_dirs, cfg.engram_threads, err)) return false;
 
+    im.shadow_layers = cfg.shadow_layers;
     // layers
     im.ly.resize(cfg.head_only ? 0 : (size_t) im.nl);
     for (int64_t l = 0; !cfg.head_only && l < im.nl; ++l) {
         auto & L = im.ly[(size_t) l];
         L.ratio = G.ratio[(size_t) l];
-        if (l < im.layer_lo || l >= im.layer_hi) continue;
+        if (!im.active_layer(l)) continue;
         L.kv_src = G.is_kv_source(l);
         L.idx_src = G.is_index_source(l);
         L.cand_src = l == G.cand_layer;
@@ -1108,6 +1123,7 @@ bool Ds41Dense::init(const std::string & path, const Ds41DenseConfig & cfg, std:
             }
         };
         for (int64_t l = 0; l < im.nl; ++l) {
+            if (!im.active_layer(l)) continue;
             auto & L = im.ly[(size_t) l];
             L.raw = T(kvt, { im.DH, im.RAW });
             L.raw_snap = T(kvt, { im.DH, im.RAW });
@@ -1831,6 +1847,55 @@ bool Ds41Dense::import_handoff(int col0, int n, const float * src) {
         ggml_backend_tensor_set(im.pre_state, src, (size_t) (col0 + c) * col_p, col_p);
         src += im.HC;
     }
+    ggml_backend_synchronize(im.backend);
+    return true;
+}
+
+static void copy_tensor_bytes(ggml_tensor * dst, const ggml_tensor * src, ggml_backend_t backend) {
+    if (!dst || !src || ggml_nbytes(dst) != ggml_nbytes(src)) return;
+    std::vector<uint8_t> buf(ggml_nbytes(src));
+    ggml_backend_tensor_get(src, buf.data(), 0, buf.size());
+    ggml_backend_tensor_set(dst, buf.data(), 0, buf.size());
+}
+
+static void copy_tensor_cols(ggml_tensor * dst, const ggml_tensor * src, int col0, int n, size_t col_bytes) {
+    if (!dst || !src || col_bytes == 0) return;
+    std::vector<uint8_t> buf(col_bytes);
+    for (int c = 0; c < n; ++c) {
+        const size_t off = (size_t) (col0 + c) * col_bytes;
+        ggml_backend_tensor_get(src, buf.data(), off, col_bytes);
+        ggml_backend_tensor_set(dst, buf.data(), off, col_bytes);
+    }
+}
+
+bool Ds41Dense::import_layer_cache_from(const Ds41Dense & src, int64_t global_layer, int col0, int n) {
+    Impl & im = *p_;
+    const Impl & sm = *src.p_;
+    if (global_layer < 0 || global_layer >= im.nl || col0 < 0 || n < 1 || col0 + n > im.NC) return false;
+    auto & L = im.ly[(size_t) global_layer];
+    const auto & SL = sm.ly[(size_t) global_layer];
+    ggml_backend_synchronize(sm.backend);
+    if (L.sel && SL.sel) {
+        const size_t col_bytes = (size_t) im.ITOP * 4;
+        copy_tensor_cols(L.sel, SL.sel, col0, n, col_bytes);
+        copy_tensor_cols(L.selm, SL.selm, col0, n, col_bytes);
+    }
+    if (L.comp && SL.comp) copy_tensor_bytes(L.comp, SL.comp, im.backend);
+    if (L.idxk && SL.idxk) copy_tensor_bytes(L.idxk, SL.idxk, im.backend);
+    if (L.raw && SL.raw) copy_tensor_bytes(L.raw, SL.raw, im.backend);
+    if (L.st_kv && SL.st_kv) copy_tensor_bytes(L.st_kv, SL.st_kv, im.backend);
+    if (L.st_sc && SL.st_sc) copy_tensor_bytes(L.st_sc, SL.st_sc, im.backend);
+    ggml_backend_synchronize(im.backend);
+    return true;
+}
+
+bool Ds41Dense::import_cand_from(const Ds41Dense & src, int col0, int n) {
+    Impl & im = *p_;
+    const Impl & sm = *src.p_;
+    if (!im.cand || !sm.cand || col0 < 0 || n < 1 || col0 + n > im.NC) return false;
+    ggml_backend_synchronize(sm.backend);
+    const size_t col_bytes = (size_t) im.CB * 4;
+    copy_tensor_cols(im.cand, sm.cand, col0, n, col_bytes);
     ggml_backend_synchronize(im.backend);
     return true;
 }

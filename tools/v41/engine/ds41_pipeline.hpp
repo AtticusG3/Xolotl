@@ -13,6 +13,8 @@ struct Ds41Stage {
     int cuda_device = 0;
     int64_t layer_lo = 0;
     int64_t layer_hi = 0;
+    std::vector<int64_t> import_layers;   ///< shadow layers copied from the previous stage at handoff
+    bool import_cand = false;
     ggml_backend_t backend = nullptr;
     bool own_backend = false;
     std::unique_ptr<Ds41Dense> dense;

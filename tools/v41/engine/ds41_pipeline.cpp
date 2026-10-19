@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 
 #ifdef STRATA_ENABLE_CUDA
 #include <cuda_runtime.h>
@@ -110,6 +111,17 @@ bool ds41_selftest_handoffs(Ds41Pipeline & pipe, std::string & err) {
     }
     if (pipe.head_offload()) {
         const int last = pipe.n_stages() - 1;
+#ifdef STRATA_ENABLE_CUDA
+        cudaSetDevice(pipe.stages[(size_t) last].cuda_device);
+#endif
+        if (!pipe.dense(last).import_handoff(0, kCols, stage_pat[(size_t) last].data())) {
+            err = "selftest re-seed tail: " + pipe.dense(last).last_error();
+            return false;
+        }
+        if (!pipe.dense(last).set_pass_layout(kCols, 0)) {
+            err = "selftest tail layout: " + pipe.dense(last).last_error();
+            return false;
+        }
         if (!pipe.sync_head_state(0, kCols, err)) {
             err = "selftest head handoff: " + err;
             return false;
@@ -197,6 +209,20 @@ bool Ds41Pipeline::sync_handoff_between(int from_stage, int to_stage, int col0, 
 #endif
     if (!d1.import_handoff_from(d0, dev0, dev1, col0, n, nullptr, handoff_host)) {
         err = "import_handoff_from: " + d1.last_error();
+        return false;
+    }
+    for (int64_t gl : stages[(size_t) to_stage].import_layers) {
+        if (!d1.import_layer_cache_from(d0, gl, col0, n)) {
+            err = "layer cache handoff L" + std::to_string((long long) gl);
+            return false;
+        }
+    }
+    if (stages[(size_t) to_stage].import_cand && !d1.import_cand_from(d0, col0, n)) {
+        err = "cand handoff failed";
+        return false;
+    }
+    if (d0.pass_size() > 0 && !d1.set_pass_layout(d0.pass_size(), d0.pass_pos0())) {
+        err = "handoff pass layout: " + d1.last_error();
         return false;
     }
     return true;
@@ -289,6 +315,36 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         err = "need " + std::to_string(splits.size() + 1) + " stage devices for " + std::to_string(splits.size()) + " split(s)";
         return false;
     }
+    Ds41Geometry Ggeo;
+    {
+        GgufModel gm = GgufModel::open(model);
+        const std::string gerr = ds41_read_geometry(gm, Ggeo);
+        if (!gerr.empty()) { err = "geometry: " + gerr; return false; }
+    }
+    const std::vector<int> valid_bounds = Ggeo.valid_split_boundaries();
+    std::fprintf(stderr, "ds41: indexer-safe layer-split boundaries:");
+    for (int b : valid_bounds) std::fprintf(stderr, " %d", b);
+    std::fprintf(stderr, "\n");
+    for (size_t i = 0; i < splits.size(); ++i) {
+        if (Ggeo.split_boundary_ok(splits[i])) continue;
+        int best = splits[i];
+        int best_d = (int) TG.n_layers;
+        for (int b : valid_bounds) {
+            const int d = std::abs(b - splits[i]);
+            if (d < best_d) { best_d = d; best = b; }
+        }
+        if (best_d >= (int) TG.n_layers) {
+            err = "layer-split " + std::to_string(splits[i]) + " crosses indexer groups and no safe boundary exists";
+            return false;
+        }
+        std::fprintf(stderr, "ds41: layer-split %d is not indexer-safe; using %d instead\n", splits[i], best);
+        splits[i] = best;
+        for (size_t j = i + 1; j < splits.size(); ++j)
+            if (splits[j] <= splits[j - 1]) {
+                err = "layer-split boundaries must be strictly increasing after adjustment";
+                return false;
+            }
+    }
     out.split_layers = splits;
     out.split_layer = splits[0];
     std::fprintf(stderr, "ds41: %zu-way layer split at", splits.size());
@@ -296,12 +352,7 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
     std::fprintf(stderr, " across GPUs");
     for (int d : split_devices) std::fprintf(stderr, " %d", d);
     std::fprintf(stderr, "\n");
-    Ds41Geometry Ggeo;
     std::string gerr;
-    if (!dc_template.engram_dirs.empty()) {
-        GgufModel gm = GgufModel::open(model);
-        gerr = ds41_read_geometry(gm, Ggeo);
-    }
     auto stage_has_engram = [&](int64_t lo, int64_t hi) -> bool {
         if (!gerr.empty()) return true;
         for (int64_t el : Ggeo.engram_layers)
@@ -314,6 +365,13 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         st.cuda_device = split_devices[(size_t) s];
         st.layer_lo = s == 0 ? 0 : splits[(size_t) (s - 1)];
         st.layer_hi = s < (int) splits.size() ? splits[(size_t) s] : TG.n_layers;
+        if (s > 0) {
+            st.import_layers = Ggeo.stage_import_layers(st.layer_lo, st.layer_hi);
+            if (Ggeo.cand_layer >= 0 && Ggeo.cand_layer < st.layer_lo) {
+                for (int64_t l = st.layer_lo; l < st.layer_hi; ++l)
+                    if (l > Ggeo.cand_layer && Ggeo.is_index_source(l)) { st.import_cand = true; break; }
+            }
+        }
         if (s > 0 && out.stages[(size_t) (s - 1)].cuda_device == st.cuda_device && out.stages[(size_t) (s - 1)].backend) {
             st.backend = out.stages[(size_t) (s - 1)].backend;
             st.own_backend = false;
@@ -327,6 +385,7 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         dc.layer_lo = st.layer_lo;
         dc.layer_hi = st.layer_hi;
         dc.cuda_device = st.cuda_device;
+        dc.shadow_layers = st.import_layers;
         dc.omit_output_head = head_cuda_device >= 0 && s == n_stages - 1;
         if (!dc.engram_dirs.empty() && !stage_has_engram(st.layer_lo, st.layer_hi)) dc.engram_dirs.clear();
         st.dense = std::make_unique<Ds41Dense>();

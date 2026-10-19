@@ -13,6 +13,7 @@
 
 #include "strata/artifact/gguf_reader.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -81,6 +82,44 @@ struct Ds41Geometry {
         return s;
     }
     int64_t hc_mix() const { return (2 + hc) * hc; }
+
+    /// True if a pipeline may start a new stage at layer `split` (no cross-stage indexer / KV / cand deps).
+    bool split_boundary_ok(int64_t split) const {
+        if (split <= 0 || split >= n_layer) return false;
+        for (int64_t l = split; l < n_layer; ++l) {
+            const int64_t ix = idx_src(l);
+            const int64_t kv = kv_src(l);
+            if (ix >= 0 && ix < split) return false;
+            if (kv >= 0 && kv < split) return false;
+            if (cand_layer >= 0 && l > cand_layer && is_index_source(l) && cand_layer < split) return false;
+        }
+        return true;
+    }
+    std::vector<int> valid_split_boundaries() const {
+        std::vector<int> out;
+        for (int64_t b = 1; b < n_layer; ++b)
+            if (split_boundary_ok(b)) out.push_back((int) b);
+        return out;
+    }
+    /// Layers on the previous stage that must be copied when entering [stage_lo, stage_hi).
+    std::vector<int64_t> stage_import_layers(int64_t stage_lo, int64_t stage_hi) const {
+        std::vector<int64_t> out;
+        auto add = [&](int64_t x) {
+            if (x < 0 || x >= stage_lo) return;
+            for (int64_t y : out) if (y == x) return;
+            out.push_back(x);
+        };
+        for (int64_t l = stage_lo; l < stage_hi; ++l) {
+            add(idx_src(l));
+            add(kv_src(l));
+        }
+        if (cand_layer >= 0 && cand_layer < stage_lo) {
+            for (int64_t l = stage_lo; l < stage_hi; ++l)
+                if (l > cand_layer && is_index_source(l)) add(cand_layer);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
 
 private:
     static bool contains(const std::vector<int64_t> & v, int64_t x) {

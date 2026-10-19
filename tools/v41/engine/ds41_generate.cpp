@@ -912,6 +912,9 @@ int main(int argc, char ** argv) {
         vlog.resize((size_t) m * nv);
         if (!head_logits(0, m, vlog.data())) return false;
         lap(3);
+        if (dprof && pv_n % 16 == 0)
+            std::fprintf(stderr, "verify pass ms/token: dense %.2f tier %.2f taps %.2f logits %.2f (%ld passes, %ld tokens)\n",
+                         pv_ms[0] / pv_tok, pv_ms[1] / pv_tok, pv_ms[2] / pv_tok, pv_ms[3] / pv_tok, pv_n, pv_tok);
         return true;
     };
     const int NP = std::max(1, a.prefill_chunk);
@@ -2089,6 +2092,7 @@ int main(int argc, char ** argv) {
     long sp_pass = 0, sp_acc = 0, sp_refeed = 0, sp_full = 0;
     const bool sp_noacc = std::getenv("STRATA_DSPARK_NOACC") != nullptr;
     double sp_vms = 0, sp_dms = 0;
+    long sp_prof_n = 0;
     if (spec) {
         int P = (int) prompt.size() - 1, t = sp_bonus, prev = prompt.back();
         bool dirty = false;   // the last pass rejected something
@@ -2170,7 +2174,16 @@ int main(int argc, char ** argv) {
             dirty = acc < k;
             P += 1 + acc;
             t = g[acc];
+            if (dprof) {
+                ++sp_prof_n;
+                if (sp_prof_n % 32 == 0 && sp_pass > 0)
+                    std::fprintf(stderr, "DSpark ms/token: verify %.2f draft %.2f acc %.2f (%ld passes)\n", sp_vms / sp_pass,
+                                 sp_dms / sp_pass, (double) sp_acc / sp_pass, sp_pass);
+            }
         }
+        if (dprof && sp_pass > 0)
+            std::fprintf(stderr, "DSpark totals: verify %.2f ms/pass draft %.2f ms/pass acc %.2f (%ld passes, %ld tokens)\n",
+                         sp_vms / sp_pass, sp_dms / sp_pass, (double) sp_acc / sp_pass, sp_pass, gen);
     }
 #endif
     for (; !spec && gen < a.n_predict; ++gen) {

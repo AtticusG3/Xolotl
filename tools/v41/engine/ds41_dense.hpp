@@ -63,6 +63,8 @@ struct Ds41DenseConfig {
     /// Logits-only instance: output_norm + output.weight and a minimal x/pre state (no transformer layers).
     bool head_only = false;
     int cuda_device = -1;   ///< CUDA ordinal (for peer copies); -1 = unknown
+    /// Layers below layer_lo whose KV / indexer state is copied from the previous pipeline stage at handoff.
+    std::vector<int64_t> shadow_layers;
 };
 
 class Ds41Dense {
@@ -173,6 +175,9 @@ public:
     /// Copy handoff columns from `src`: CUDA peer when available, else explicit pinned-host staging on `cuda_stream`.
     bool import_handoff_from(const Ds41Dense & src, int src_cuda_device, int dst_cuda_device, int col0, int n, void * cuda_stream,
                              std::vector<float> & pinned_host);
+    /// Copy persistent / per-column layer state for a dependency layer from `src` (pipeline handoff).
+    bool import_layer_cache_from(const Ds41Dense & src, int64_t global_layer, int col0, int n);
+    bool import_cand_from(const Ds41Dense & src, int col0, int n);
     /// begin() without the embedding init graph; state columns must already hold the handoff (import_handoff).
     bool begin_continued(const int * tids, int n, int pos0);
     /// Layer-major batch after import_handoff: same span_cap / batch fields as begin_batch, no init graph.
