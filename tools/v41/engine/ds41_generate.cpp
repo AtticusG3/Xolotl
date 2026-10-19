@@ -98,6 +98,8 @@ struct Args {
     double chunk_prefetch_gib = 0.0;
     std::string layer_split;
     std::string split_device;
+    std::string stage_devices;   ///< alias for --split-device (V100 stage ordinals only)
+    std::string head_device;     ///< CUDA ordinal for output head + DSpark (--head-device / STRATA_HEAD_DEVICE)
     bool split_skip_if_fits = false;
     int64_t conversation_cache_mib = 0;
     int conversation_cache_slots = 4;
@@ -182,6 +184,8 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--prompt-cache-root") a.prompt_cache_root = next();
         else if (k == "--layer-split") a.layer_split = next();
         else if (k == "--split-device") a.split_device = next();
+        else if (k == "--stage-devices") a.stage_devices = next();
+        else if (k == "--head-device") a.head_device = next();
         else if (k == "--split-skip-if-fits") a.split_skip_if_fits = true;
         else if (k == "--pool-workers" || k == "--max-context" || k == "--kv-resident" ||
                  k == "--spec" || k == "--spec-min-p" || k == "--batch" || k == "--batch-mtp" ||
@@ -373,6 +377,9 @@ int main(int argc, char ** argv) {
     if (dc.kv_fp4) std::fprintf(stderr, "kv: compressed KV NVFP4 + indexer keys MXFP4 (--kv-fp4, exact)\n");
     std::string err;
     const double t_load = now_ms();
+    int head_cuda_device = -1;
+    if (const char * hd = std::getenv("STRATA_HEAD_DEVICE")) head_cuda_device = std::atoi(hd);
+    if (!a.head_device.empty()) head_cuda_device = std::atoi(a.head_device.c_str());
     std::vector<int> split_devs;
     if (!a.layer_split.empty()) {
         auto parse_ints = [](const std::string & str, std::vector<int> & out) -> bool {
@@ -392,16 +399,32 @@ int main(int argc, char ** argv) {
         if (cudaGetDeviceCount(&n_dev) != cudaSuccess || n_dev < 1) n_dev = 1;
         cudaGetLastError();
 #endif
-        if (!a.split_device.empty()) {
-            if (!parse_ints(a.split_device, split_devs)) {
-                std::fprintf(stderr, "ds41_generate: --split-device needs comma-separated GPU indices\n");
+        const std::string & stage_list = !a.stage_devices.empty() ? a.stage_devices : a.split_device;
+        if (!stage_list.empty()) {
+            if (!parse_ints(stage_list, split_devs)) {
+                std::fprintf(stderr, "ds41_generate: --stage-devices needs comma-separated GPU indices\n");
                 return 2;
             }
+        } else if (head_cuda_device >= 0) {
+            std::fprintf(stderr, "ds41_generate: --head-device requires --stage-devices (the trunk GPUs, not the head)\n");
+            return 2;
         } else {
             for (int d = 0; d < n_dev && (int) split_devs.size() < 2; ++d) split_devs.push_back(d);
         }
+        if (head_cuda_device >= 0) {
+            for (int sd : split_devs)
+                if (sd == head_cuda_device) {
+                    std::fprintf(stderr, "ds41_generate: head device %d must not appear in --stage-devices\n", head_cuda_device);
+                    return 2;
+                }
+            if (split_devs.size() < 2) {
+                std::fprintf(stderr, "ds41_generate: --head-device needs a layer split with two stage devices\n");
+                return 2;
+            }
+        }
         if (a.layer_split != "auto" && split_devs.size() < 2) {
-            for (int d = 1; d < n_dev && (int) split_devs.size() < 2; ++d) split_devs.push_back(d);
+            for (int d = 1; d < n_dev && (int) split_devs.size() < 2; ++d)
+                if (d != head_cuda_device) split_devs.push_back(d);
         }
     }
     Ds41FileBlobs src(a.model);
@@ -446,11 +469,15 @@ int main(int argc, char ** argv) {
         mc.exclude = pruned;
     }
     Ds41Pipeline pipe;
-    if (!ds41_build_pipeline(a.model, a.layer_split, split_devs, a.vram_margin_gib, dc, mc, src, pipe, err)) {
+    if (!ds41_build_pipeline(a.model, a.layer_split, split_devs, head_cuda_device, a.vram_margin_gib, dc, mc, src, pipe, err)) {
         std::fprintf(stderr, "ds41_generate: pipeline: %s\n", err.c_str());
         return 1;
     }
     Ds41Dense & dense = ds41_head_dense(pipe);
+    auto head_logits = [&](int row0, int nrows, float * out) -> bool {
+        if (!ds41_head_logits(pipe, row0, nrows, out, err)) { ferr = err; return false; }
+        return true;
+    };
     const Ds41Geometry & G = pipe.dense(0).geom();
     const int n_layer = (int) G.n_layer, n_embd = (int) G.n_embd, top_k = (int) G.n_used, nv = (int) G.vocab;
     int CL = 0;
@@ -869,7 +896,7 @@ int main(int argc, char ** argv) {
                 if (!pv_layer(l)) return false;
         }
         vlog.resize((size_t) m * nv);
-        if (!dense.logits(0, m, vlog.data())) { ferr = dense.last_error(); return false; }
+        if (!head_logits(0, m, vlog.data())) return false;
         lap(3);
         return true;
     };
@@ -911,12 +938,14 @@ int main(int argc, char ** argv) {
             Ds41DSparkConfig sc;
             // Layer split: the trunk head (shared output.weight) lives on the last stage; DSpark must run there too.
             sc.backend = dense.backend();
+            if (pipe.head_offload()) sc.cuda_device = pipe.head->cuda_device;
             sc.sidecar = dsp_path;
             sc.main_gguf = a.model;
             sc.max_append = 16;
             if (!std::getenv("STRATA_DSPARK_OWN_HEAD")) sc.shared_head = dense.weight("output.weight");   // -0.7 GB
 #ifdef STRATA_ENABLE_CUDA
-            if (pipe.enabled()) cudaSetDevice(pipe.stages[(size_t) (pipe.n_stages() - 1)].cuda_device);
+            if (pipe.head_offload()) cudaSetDevice(pipe.head->cuda_device);
+            else if (pipe.enabled()) cudaSetDevice(pipe.stages[(size_t) (pipe.n_stages() - 1)].cuda_device);
 #endif
             dsp = std::make_unique<Ds41DSpark>();
             const double ti = now_ms();
@@ -989,7 +1018,7 @@ int main(int argc, char ** argv) {
         const int t0 = n - tail_keep, lo = std::max(row0, t0), hi = row0 + nrows;
         if (lo >= hi) return true;
         if (tail_logits.size() != (size_t) tail_keep * (size_t) nv) tail_logits.assign((size_t) tail_keep * (size_t) nv, 0.0f);
-        if (!dense.logits(dense_row0 + (lo - row0), hi - lo, tail_logits.data() + (size_t) (lo - t0) * nv)) { ferr = dense.last_error(); return false; }
+        if (!head_logits(dense_row0 + (lo - row0), hi - lo, tail_logits.data() + (size_t) (lo - t0) * nv)) return false;
         return true;
     };
     int bcap_n = 0, bcap_got = 0;  // serve DSpark seed captured from a layer-major batch (see the layer loop below)
@@ -1144,10 +1173,10 @@ int main(int argc, char ** argv) {
                     all_logits->resize((size_t) (c0 + B) * (size_t) nv);
                     for (int s = 0; s < B; s += SB) {
                         const int sn = std::min(SB, B - s);
-                        if (!cur_dense->logits(s, sn, all_logits->data() + (size_t) (c0 + s) * nv)) { ferr = cur_dense->last_error(); return false; }
+                        if (!head_logits(s, sn, all_logits->data() + (size_t) (c0 + s) * nv)) return false;
                     }
                     if (c0 + B == n) std::copy(all_logits->end() - nv, all_logits->end(), last_logits.begin());
-                } else if (c0 + B == n && !cur_dense->logits(B - 1, 1, last_logits.data())) { ferr = cur_dense->last_error(); return false; }
+                } else if (c0 + B == n && !head_logits(B - 1, 1, last_logits.data())) return false;
                 for (int s = 0; tail_keep > 0 && s < B; s += SB)   // one sub-batch at a time, as above
                     if (!capture_tail(n, c0 + s, std::min(SB, B - s), s)) return false;
                 fd_logits += now_ms() - tl;
@@ -1196,9 +1225,9 @@ int main(int argc, char ** argv) {
                 const double tl = now_ms();
                 if (all_logits) {
                     all_logits->resize((size_t) (c0 + m) * (size_t) nv);
-                    if (!cur_dense->logits(0, m, all_logits->data() + (size_t) c0 * nv)) { ferr = cur_dense->last_error(); return false; }
+                    if (!head_logits(0, m, all_logits->data() + (size_t) c0 * nv)) return false;
                     if (c0 + m == n) std::copy(all_logits->end() - nv, all_logits->end(), last_logits.begin());
-                } else if (c0 + m == n && !cur_dense->logits(m - 1, 1, last_logits.data())) { ferr = cur_dense->last_error(); return false; }
+                } else if (c0 + m == n && !head_logits(m - 1, 1, last_logits.data())) return false;
                 if (!capture_tail(n, c0, m, 0)) return false;
                 fd_logits += now_ms() - tl;
                 c0 += m;
@@ -1544,7 +1573,7 @@ int main(int argc, char ** argv) {
                     last_rows = m;
                     if (i / 64 != before / 64 && i < dh) pp(i);
                 }
-                if (!dense.logits(last_rows - 1, 1, last_logits.data())) { ferr = dense.last_error(); return false; }
+                if (!head_logits(last_rows - 1, 1, last_logits.data())) return false;
                 pp(dh);
                 return true;
             };
@@ -1885,7 +1914,7 @@ int main(int argc, char ** argv) {
                 ++gen;
                 if (is_stop(tok)) { finish = "stop"; break; }
                 if ((max_new > 0 && gen >= max_new) || pos + 1 >= ctxv) break;
-                if (!step(tok, pos) || !dense.logits(0, 1, lg.data())) { finish = "error"; break; }
+                if (!step(tok, pos) || !head_logits(0, 1, lg.data())) { finish = "error"; break; }
                 hist.push_back(tok);
                 ++pos;
                 tier.rebalance_tick();
@@ -1945,7 +1974,7 @@ int main(int argc, char ** argv) {
     if (!ok) { std::fprintf(stderr, "\nds41_generate: prefill: %s\n", ferr.c_str()); return 1; }
     if (dm_tail > 0 && defer_vram && !open_cache()) { std::fprintf(stderr, "ds41_generate: deferred seed: %s\n", err.c_str()); return 1; }
     for (int i = (int) prompt.size() - dm_tail; i < (int) prompt.size(); ++i)
-        if (!step(prompt[(size_t) i], i) || !dense.logits(0, 1, last_logits.data())) {
+        if (!step(prompt[(size_t) i], i) || !head_logits(0, 1, last_logits.data())) {
             std::fprintf(stderr, "ds41_generate: dump-main prompt step: %s\n", ferr.c_str());
             return 1;
         }
@@ -2142,7 +2171,7 @@ int main(int argc, char ** argv) {
         std::fflush(stdout);
         if (std::find(a.stop.begin(), a.stop.end(), tok) != a.stop.end() || tok == (int) G.eos) { ++gen; break; }
         if (gen + 1 == a.n_predict) { ++gen; break; }
-        if (!step(tok, pos) || !dense.logits(0, 1, lg.data())) { std::fprintf(stderr, "ds41_generate: decode: %s\n", ferr.c_str()); return 1; }
+        if (!step(tok, pos) || !head_logits(0, 1, lg.data())) { std::fprintf(stderr, "ds41_generate: decode: %s\n", ferr.c_str()); return 1; }
         ++pos;
     }
     const double dec_ms = now_ms() - td0;

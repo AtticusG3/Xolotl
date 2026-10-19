@@ -6,14 +6,17 @@ This page is for **buster** only: dual V100-SXM2 (sm_70), Broadwell dual-socket 
 
 | Area | Status |
 | --- | --- |
-| Build for sm_70 (`STRATA_EXPERIMENTAL_SM60`, CUDA 12.x) | `tools/buster/cmake-buster.sh` (`CMAKE_CUDA_ARCHITECTURES=70-real`) |
+| Build for sm_70 + sm_86 (`STRATA_EXPERIMENTAL_SM60`, CUDA 12.x) | `tools/buster/cmake-buster.sh` (`CMAKE_CUDA_ARCHITECTURES='70-real;86-real'`) |
+| **Head GPU (3090) for output + DSpark** | `--head-device 0 --stage-devices 1,2` (experts/arena only on V100s) |
 | **Layer split across both V100s (DS41)** | `--layer-split` + `gpu: [1,2]`; per-stage `ggml_backend_cuda_init`; PCIe handoff |
 | **Conversation cache (DS41)** | `--conversation-cache-*`, multi-stage capture/restore |
-| DSpark on sm_70 | Not validated |
+| DSpark on sm_70 layer-split | Validated (ac0cbe8a); optional head offload on 3090 |
 
 ### Driver / toolkit note (buster: 550 + CUDA 12.9)
 
-NVIDIA driver **550** officially supports up to **CUDA 12.4**. A **12.9** toolkit on that driver relies on **minor-version compatibility** (forward-compatible driver + older max supported CUDA). Volta has **no PTX JIT fallback** for missing SASS: the build must embed **native sm_70 machine code**. `cmake-buster.sh` sets `-DCMAKE_CUDA_ARCHITECTURES=70-real` so nvcc emits cubins for sm_70, not PTX-only `70-virtual`.
+NVIDIA driver **550** officially supports up to **CUDA 12.4**. A **12.9** toolkit on that driver relies on **minor-version compatibility** (forward-compatible driver + older max supported CUDA). Volta has **no PTX JIT fallback** for missing SASS: the build must embed **native sm_70 machine code**. `cmake-buster.sh` sets `-DCMAKE_CUDA_ARCHITECTURES='70-real;86-real'` so nvcc emits cubins for V100 and an optional RTX 3090 head card, not PTX-only virtual arch.
+
+`STRATA_SM70_TABLE`, `STRATA_PROMPT_ATTN_OLD`, and `STRATA_BF16_TC` in `tools/buster/buster-engine.sh` are **process-wide** runtime toggles in ggml (they follow the minimum compute capability among visible CUDA devices). With a 3090 visible alongside V100s, the minimum CC is still 7.0, so Volta paths stay selected for all GPUs in the process. The 3090 head only runs the output matmul, DSpark, and small state — not the heavy sm_70 attention path.
 
 Host **GCC** must be one nvcc accepts (often 11 or 12; **gcc 13** may work on CUDA 12.9 but is not the documented default).
 
@@ -64,7 +67,10 @@ c++ -std=c++17 -I include tools/buster/test_cuda_cc_policy.cpp -o /tmp/test_cuda
 ## Run
 
 ```bash
+# Trunk only on both V100s:
 export CUDA_VISIBLE_DEVICES=1,2
+# Trunk on V100s + 3090 head (PCI 0 = 3090, 1–2 = V100s): leave all three visible and pass --head-device 0 --stage-devices 1,2 to the engine.
+# export CUDA_VISIBLE_DEVICES=0,1,2
 export STRATA_BUILD_DIR=/opt/xolotl/build-buster
 python3 tools/v41/serve/serve_ds41.py --engine strata --config tools/v41/serve/strata-buster-ds41-1017.json --port 8150
 ```

@@ -21,7 +21,12 @@ inline Ds41MoeTier & ds41_tier_for(Ds41Pipeline & pipe, int global_layer) {
 }
 
 inline Ds41Dense & ds41_head_dense(Ds41Pipeline & pipe) {
+    if (pipe.head_offload()) return *pipe.head->dense;
     return pipe.enabled() ? pipe.dense(pipe.n_stages() - 1) : pipe.dense(0);
+}
+
+inline bool ds41_head_logits(Ds41Pipeline & pipe, int row0, int nrows, float * out, std::string & err) {
+    return pipe.head_logits(row0, nrows, out, err);
 }
 
 inline bool ds41_handoff_between_stages(Ds41Pipeline & pipe, int col0, int n, std::string & err) {

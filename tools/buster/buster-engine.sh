@@ -15,6 +15,8 @@ export STRATA_SERVE_STEP_MAX="${STRATA_SERVE_STEP_MAX:-96}"
 export STRATA_SERVE_PASS_BIAS="${STRATA_SERVE_PASS_BIAS:-0}"
 # DSpark stays off unless the caller sets STRATA_SERVE_DSPARK=<sidecar> (empty export still makes getenv non-null).
 [ -n "${STRATA_SERVE_DSPARK:-}" ] || unset STRATA_SERVE_DSPARK
+# Optional RTX 3090 head GPU (device 0 in PCI order): trunk on --stage-devices, head + DSpark on --head-device / STRATA_HEAD_DEVICE.
+[ -n "${STRATA_HEAD_DEVICE:-}" ] || unset STRATA_HEAD_DEVICE
 export STRATA_DSPARK_DEPTH="${STRATA_DSPARK_DEPTH:-4}"
 export STRATA_DSPARK_CONF="${STRATA_DSPARK_CONF:-0.6}"
 export STRATA_DENSE_REQUANT="${STRATA_DENSE_REQUANT:-q6_K}"

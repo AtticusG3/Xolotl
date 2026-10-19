@@ -71,8 +71,43 @@ size_t Ds41Pipeline::handoff_bytes(int n) const {
     return stages[0].dense->handoff_bytes_per_column() * (size_t) n;
 }
 
+Ds41Pipeline::~Ds41Pipeline() {
+#ifdef STRATA_ENABLE_CUDA
+    if (head && head->cuda_stream) cudaStreamDestroy((cudaStream_t) head->cuda_stream);
+#endif
+}
+
+bool Ds41Pipeline::sync_head_state(int col0, int n, std::string & err) {
+    if (!head_offload()) return true;
+    Ds41Dense & tail = dense(n_stages() - 1);
+    Ds41Dense & hd = *head->dense;
+#ifdef STRATA_ENABLE_CUDA
+    cudaSetDevice(head->cuda_device);
+#endif
+    if (!hd.import_handoff_peer(tail, stages.back().cuda_device, col0, n, head->cuda_stream)) {
+        err = "head handoff peer copy failed";
+        return false;
+    }
+    return true;
+}
+
+bool Ds41Pipeline::head_logits(int row0, int nrows, float * out, std::string & err) {
+    if (!head_offload()) {
+        Ds41Dense & d = enabled() ? dense(n_stages() - 1) : dense(0);
+        if (!d.logits(row0, nrows, out)) { err = d.last_error(); return false; }
+        return true;
+    }
+    if (!sync_head_state(row0, nrows, err)) return false;
+#ifdef STRATA_ENABLE_CUDA
+    cudaSetDevice(head->cuda_device);
+    if (head->cuda_stream) cudaStreamSynchronize((cudaStream_t) head->cuda_stream);
+#endif
+    if (!head->dense->logits(row0, nrows, out)) { err = head->dense->last_error(); return false; }
+    return true;
+}
+
 bool ds41_build_pipeline(const std::string & model, const std::string & layer_split, const std::vector<int> & split_devices,
-                         double vram_margin_gib, Ds41DenseConfig dc_template, Ds41MoeConfig mc_template,
+                         int head_cuda_device, double vram_margin_gib, Ds41DenseConfig dc_template, Ds41MoeConfig mc_template,
                          Ds41FileBlobs & shared_blobs, Ds41Pipeline & out, std::string & err) {
     out.stages.clear();
     const Ds41MoeGeom & TG = shared_blobs.geom();
@@ -95,6 +130,7 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         dc.backend = st.backend;
         dc.layer_lo = 0;
         dc.layer_hi = TG.n_layers;
+        dc.cuda_device = st.cuda_device;
         st.dense = std::make_unique<Ds41Dense>();
         if (!st.dense->init(model, dc, err)) return false;
         Ds41MoeConfig mc = mc_template;
@@ -133,6 +169,8 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
         dc.backend = st.backend;
         dc.layer_lo = st.layer_lo;
         dc.layer_hi = st.layer_hi;
+        dc.omit_output_head = head_cuda_device >= 0 && s == 1;
+        dc.cuda_device = st.cuda_device;
         if (!dc.engram_dirs.empty() && !stage_has_engram(st.layer_lo, st.layer_hi)) dc.engram_dirs.clear();
         st.dense = std::make_unique<Ds41Dense>();
         if (!st.dense->init(model, dc, err)) return false;
@@ -148,6 +186,32 @@ bool ds41_build_pipeline(const std::string & model, const std::string & layer_sp
     }
     out.handoff_host.resize(
         out.handoff_bytes(dc_template.prompt_batch > 0 ? dc_template.prompt_batch : 512) / sizeof(float));
+    if (head_cuda_device >= 0) {
+        out.head = std::make_unique<Ds41HeadStage>();
+        Ds41HeadStage & hs = *out.head;
+        hs.cuda_device = head_cuda_device;
+        hs.backend = make_cuda_backend(hs.cuda_device, err);
+        if (!hs.backend) return false;
+        hs.own_backend = true;
+#ifdef STRATA_ENABLE_CUDA
+        cudaStream_t stream = nullptr;
+        if (cudaSetDevice(hs.cuda_device) != cudaSuccess || cudaStreamCreate(&stream) != cudaSuccess) {
+            err = "head device cudaStreamCreate failed";
+            return false;
+        }
+        hs.cuda_stream = stream;
+#endif
+        Ds41DenseConfig hdc = dc_template;
+        hdc.backend = hs.backend;
+        hdc.head_only = true;
+        hdc.omit_output_head = false;
+        hdc.cuda_device = hs.cuda_device;
+        hdc.engram_dirs.clear();
+        hs.dense = std::make_unique<Ds41Dense>();
+        if (!hs.dense->init(model, hdc, err)) return false;
+        std::fprintf(stderr, "ds41: output head + DSpark target on CUDA device %d (layers on %d and %d)\n", hs.cuda_device,
+                     split_devices[0], split_devices[1]);
+    }
     return true;
 }
 

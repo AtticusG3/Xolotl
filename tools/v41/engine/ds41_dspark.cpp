@@ -7,6 +7,10 @@
 
 #include "ggml-alloc.h"
 
+#ifdef STRATA_ENABLE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -419,6 +423,9 @@ Ds41DSpark::Impl::G & Ds41DSpark::Impl::graph(int k, bool draft) {
 bool Ds41DSpark::step(const float * mh, const int * pos, int k, int bonus, int * ids, float * conf) {
     Impl & im = *p_;
     if (k < 1 || k > im.KM) { im.err = "DSpark step: k out of range"; return false; }
+#ifdef STRATA_ENABLE_CUDA
+    if (im.cfg.cuda_device >= 0) cudaSetDevice(im.cfg.cuda_device);
+#endif
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<int32_t> mp(pos, pos + k), ms((size_t) k);
     for (int i = 0; i < k; ++i) { ms[(size_t) i] = pos[i] % (int) WIN; im.filled[(size_t) ms[(size_t) i]] = pos[i]; }

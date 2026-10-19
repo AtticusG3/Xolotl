@@ -58,6 +58,11 @@ struct Ds41DenseConfig {
     bool    elastic_cols = false;
     int64_t layer_lo = 0;   ///< layer split: first layer this instance runs (inclusive)
     int64_t layer_hi = -1;  ///< exclusive end; -1 = all layers in the file
+    /// Tail stage with layer_hi == n_layer: skip output_norm / output.weight (they live on head_device).
+    bool omit_output_head = false;
+    /// Logits-only instance: output_norm + output.weight and a minimal x/pre state (no transformer layers).
+    bool head_only = false;
+    int cuda_device = -1;   ///< CUDA ordinal (for peer copies); -1 = unknown
 };
 
 class Ds41Dense {
@@ -160,6 +165,8 @@ public:
     size_t handoff_bytes_per_column() const;
     bool export_handoff(int col0, int n, float * dst) const;
     bool import_handoff(int col0, int n, const float * src);
+    /// Device-to-device handoff columns [col0, col0+n) from `src` (CUDA peer copy; `src_dev` / this device's ordinal).
+    bool import_handoff_peer(const Ds41Dense & src, int src_cuda_device, int col0, int n, void * cuda_stream);
     /// begin() without the embedding init graph; state columns must already hold the handoff (import_handoff).
     bool begin_continued(const int * tids, int n, int pos0);
     /// Layer-major batch after import_handoff: same span_cap / batch fields as begin_batch, no init graph.

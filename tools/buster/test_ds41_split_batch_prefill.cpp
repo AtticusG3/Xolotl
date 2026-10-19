@@ -47,7 +47,7 @@ int main(int argc, char ** argv) {
     mc.cpu_only = true;
     Ds41Pipeline pipe;
     const std::vector<int> devs = { 0, 1 };
-    if (!ds41_build_pipeline(gguf, "20", devs, 1.5, dc, mc, blobs, pipe, err)) {
+    if (!ds41_build_pipeline(gguf, "20", devs, -1, 1.5, dc, mc, blobs, pipe, err)) {
         std::fprintf(stderr, "FAIL: pipeline: %s\n", err.c_str());
         return 1;
     }
