@@ -22,6 +22,7 @@
 // while decoding.
 //
 // Load the real model only through tools/ds4/memguard.sh (RAM cap + the shared GPU lock).
+#include "ds41_cuda_policy.hpp"
 #include "ds41_dense.hpp"
 #include "ds41_moe.hpp"
 #if defined(DS41_HAVE_DSPARK)
@@ -151,6 +152,26 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--enc-skip") a.enc_skip = 1;
         else if (k == "--no-enc-skip") a.enc_skip = 0;
         else if (k == "--enc-replay") a.enc_replay = std::atoi(next().c_str());
+        // Strata serve / router config compatibility (ds41_generate ignores these today; the HTTP server and
+        // generate.cpp implement them for Qwen).  Accept the flags so the same JSON drops in without edits.
+        else if (k == "--conversation-cache-mib" || k == "--conversation-cache-slots" ||
+                 k == "--conversation-cache-min-tokens" || k == "--conversation-cache-min-free-mib" ||
+                 k == "--prompt-cache" || k == "--prompt-cache-every" || k == "--prompt-cache-root" ||
+                 k == "--pool-workers" || k == "--max-context" || k == "--kv-resident" ||
+                 k == "--spec" || k == "--spec-min-p" || k == "--batch" || k == "--batch-mtp" ||
+                 k == "--vram-reserve-mib" || k == "--vram-elastic" || k == "--vram-segment-mib" ||
+                 k == "--peer-device" || k == "--split-device" || k == "--expert-profile" ||
+                 k == "--expert-profile-save" || k == "--expert-profile-save-every" || k == "--calibrate" ||
+                 k == "--vision" || k == "--split-skip-if-fits")
+            (void) next();
+        else if (k == "--prompt-cache-tail" || k == "--no-vision") { /* flag only */ }
+        else if (k == "--layer-split") {
+            (void) next();
+            std::fprintf(stderr,
+                         "ds41_generate: --layer-split is accepted for config compatibility but is NOT implemented "
+                         "for DeepSeek-V4.1 yet; only the first visible GPU runs the model. See BUSTER.md.\n");
+        }
+        else if (k == "--pcie-frac") a.pcie = std::atof(next().c_str());
         else { std::fprintf(stderr, "unknown argument %s\n", k.c_str()); return false; }
     }
     return !a.model.empty() && (a.serve || !a.ids_csv.empty() || !a.ids_file.empty() || !a.build_mirror.empty());
@@ -247,6 +268,7 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "usage: see tools/v41/engine/ds41_generate.cpp\n");
         return 2;
     }
+    ds41_apply_mmq_cc_policy(a.backend == "cuda", a.chunk_mmq);
     if (!a.build_mirror.empty()) {   // the second-drive blob mirror (STRATA_BLOB_MIRROR): coldest experts first
         std::string err;
         if (a.mirror_gib < 0) {   // --check-mirror F: open it with every blob compared against the model file
