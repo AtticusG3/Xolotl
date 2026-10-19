@@ -1,6 +1,7 @@
 #include "ds41_pipeline.hpp"
 
 #include "ggml-backend.h"
+#include "ggml-cpu.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -8,6 +9,7 @@
 
 #ifdef STRATA_ENABLE_CUDA
 #include <cuda_runtime.h>
+#include "ggml-cuda.h"
 #endif
 
 namespace strata::v41 {
@@ -26,8 +28,8 @@ static ggml_backend_t make_cuda_backend(int device, std::string & err) {
         err = "cudaSetDevice(" + std::to_string(device) + ") failed";
         return nullptr;
     }
-    ggml_backend_t be = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
-    if (!be) err = "no CUDA backend on device " + std::to_string(device);
+    ggml_backend_t be = ggml_backend_cuda_init(device);
+    if (!be) err = "ggml_backend_cuda_init(" + std::to_string(device) + ") failed";
     return be;
 #else
     err = "CUDA not compiled";

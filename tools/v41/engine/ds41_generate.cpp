@@ -38,6 +38,7 @@
 
 #ifdef STRATA_ENABLE_CUDA
 #include <cuda_runtime.h>
+#include "ggml-cuda.h"
 #endif
 
 #include <algorithm>
@@ -318,9 +319,17 @@ int main(int argc, char ** argv) {
     }
     std::mt19937_64 rng(a.seed);
 
-    // ---- dense half
-    ggml_backend_t be = a.backend == "cuda" ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
-                                            : ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    // ---- dense half (device 0 in the process's visible GPU set; layer-split stages use ggml_backend_cuda_init per stage)
+    ggml_backend_t be = nullptr;
+    if (a.backend == "cuda") {
+#ifdef STRATA_ENABLE_CUDA
+        be = ggml_backend_cuda_init(0);
+#else
+        be = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+#endif
+    } else {
+        be = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    }
     if (!be) { std::fprintf(stderr, "ds41_generate: no %s backend\n", a.backend.c_str()); return 1; }
     if (ggml_backend_is_cpu(be)) ggml_backend_cpu_set_n_threads(be, a.threads > 0 ? a.threads : 8);
     int64_t ctx = a.ctx > 0 ? a.ctx : (int64_t) prompt.size() + a.n_predict + 64;
