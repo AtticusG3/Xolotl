@@ -165,8 +165,9 @@ public:
     size_t handoff_bytes_per_column() const;
     bool export_handoff(int col0, int n, float * dst) const;
     bool import_handoff(int col0, int n, const float * src);
-    /// Device-to-device handoff columns [col0, col0+n) from `src` (CUDA peer copy; `src_dev` / this device's ordinal).
-    bool import_handoff_peer(const Ds41Dense & src, int src_cuda_device, int col0, int n, void * cuda_stream);
+    /// Copy handoff columns from `src`: CUDA peer when available, else explicit pinned-host staging on `cuda_stream`.
+    bool import_handoff_from(const Ds41Dense & src, int src_cuda_device, int dst_cuda_device, int col0, int n, void * cuda_stream,
+                             std::vector<float> & pinned_host);
     /// begin() without the embedding init graph; state columns must already hold the handoff (import_handoff).
     bool begin_continued(const int * tids, int n, int pos0);
     /// Layer-major batch after import_handoff: same span_cap / batch fields as begin_batch, no init graph.

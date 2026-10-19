@@ -1823,31 +1823,88 @@ bool Ds41Dense::import_handoff(int col0, int n, const float * src) {
     return true;
 }
 
-bool Ds41Dense::import_handoff_peer(const Ds41Dense & src, int src_cuda_device, int col0, int n, void * cuda_stream) {
+bool Ds41Dense::import_handoff_from(const Ds41Dense & src, int src_cuda_device, int dst_cuda_device, int col0, int n,
+                                    void * cuda_stream, std::vector<float> & pinned_host) {
     Impl & im = *p_;
     const Impl & sm = *src.p_;
     if (col0 < 0 || n < 1 || col0 + n > im.NC || col0 + n > sm.NC || !im.x_state || !sm.x_state) return false;
     const size_t col_x = (size_t) (im.D * im.HC) * sizeof(float);
     const size_t col_p = (size_t) im.HC * sizeof(float);
     if (col_x != (size_t) (sm.D * sm.HC) * sizeof(float) || im.HC != sm.HC) return false;
+    const size_t col_floats = col_x / sizeof(float) + col_p / sizeof(float);
+    const size_t need = col_floats * (size_t) n;
+    if (pinned_host.size() < need) {
+        pinned_host.resize(need);
 #ifdef STRATA_ENABLE_CUDA
-    const int dst_dev = im.cfg.cuda_device;
-    if (dst_dev < 0 || src_cuda_device < 0) return false;
+        if (!pinned_host.empty()) ggml_backend_cuda_register_host_buffer(pinned_host.data(), pinned_host.size() * 4);
+#endif
+    }
+#ifdef STRATA_ENABLE_CUDA
+    if (src_cuda_device < 0) src_cuda_device = sm.cfg.cuda_device;
+    if (dst_cuda_device < 0) dst_cuda_device = im.cfg.cuda_device;
+    if (src_cuda_device < 0 || dst_cuda_device < 0) return false;
     cudaStream_t stream = cuda_stream ? (cudaStream_t) cuda_stream : nullptr;
     const size_t off_x = (size_t) col0 * col_x;
     const size_t off_p = (size_t) col0 * col_p;
-    if (cudaMemcpyPeerAsync((uint8_t *) im.x_state->data + off_x, dst_dev, (uint8_t *) sm.x_state->data + off_x, src_cuda_device,
-                            n * col_x, stream) != cudaSuccess)
-        return false;
-    if (cudaMemcpyPeerAsync((uint8_t *) im.pre_state->data + off_p, dst_dev, (uint8_t *) sm.pre_state->data + off_p, src_cuda_device,
-                            n * col_p, stream) != cudaSuccess)
-        return false;
+    const size_t bytes_x = (size_t) n * col_x;
+    const size_t bytes_p = (size_t) n * col_p;
+    auto peer_ok = [&]() -> bool {
+        if (src_cuda_device == dst_cuda_device) {
+            cudaSetDevice(dst_cuda_device);
+            if (cudaMemcpyAsync((uint8_t *) im.x_state->data + off_x, (uint8_t *) sm.x_state->data + off_x, bytes_x, cudaMemcpyDeviceToDevice,
+                                stream) != cudaSuccess)
+                return false;
+            if (cudaMemcpyAsync((uint8_t *) im.pre_state->data + off_p, (uint8_t *) sm.pre_state->data + off_p, bytes_p,
+                                cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                return false;
+            return true;
+        }
+        int can = 0;
+        if (cudaDeviceCanAccessPeer(&can, src_cuda_device, dst_cuda_device) != cudaSuccess || !can) return false;
+        if (cudaMemcpyPeerAsync((uint8_t *) im.x_state->data + off_x, dst_cuda_device, (uint8_t *) sm.x_state->data + off_x,
+                                src_cuda_device, bytes_x, stream) != cudaSuccess)
+            return false;
+        if (cudaMemcpyPeerAsync((uint8_t *) im.pre_state->data + off_p, dst_cuda_device, (uint8_t *) sm.pre_state->data + off_p,
+                                src_cuda_device, bytes_p, stream) != cudaSuccess)
+            return false;
+        return true;
+    };
+    if (peer_ok()) {
+        if (!stream) cudaDeviceSynchronize();
+        return true;
+    }
+    static bool staged_logged = false;
+    if (!staged_logged) {
+        std::fprintf(stderr, "ds41: handoff GPU %d -> %d: no P2P, using pinned-host staging\n", src_cuda_device, dst_cuda_device);
+        staged_logged = true;
+    }
+    cudaSetDevice(src_cuda_device);
+    float * host = pinned_host.data();
+    for (int c = 0; c < n; ++c) {
+        const size_t cx = (size_t) (col0 + c) * col_x;
+        const size_t cp = (size_t) (col0 + c) * col_p;
+        if (cudaMemcpyAsync(host, (uint8_t *) sm.x_state->data + cx, col_x, cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
+        host += col_x / sizeof(float);
+        if (cudaMemcpyAsync(host, (uint8_t *) sm.pre_state->data + cp, col_p, cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
+        host += col_p / sizeof(float);
+    }
+    if (stream) cudaStreamSynchronize(stream);
+    else cudaDeviceSynchronize();
+    cudaSetDevice(dst_cuda_device);
+    host = pinned_host.data();
+    for (int c = 0; c < n; ++c) {
+        const size_t cx = (size_t) (col0 + c) * col_x;
+        const size_t cp = (size_t) (col0 + c) * col_p;
+        if (cudaMemcpyAsync((uint8_t *) im.x_state->data + cx, host, col_x, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        host += col_x / sizeof(float);
+        if (cudaMemcpyAsync((uint8_t *) im.pre_state->data + cp, host, col_p, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        host += col_p / sizeof(float);
+    }
     if (!stream) cudaDeviceSynchronize();
     return true;
 #else
-    std::vector<float> host((size_t) n * (sm.D * sm.HC + sm.HC));
-    if (!src.export_handoff(col0, n, host.data())) return false;
-    return import_handoff(col0, n, host.data());
+    if (!src.export_handoff(col0, n, pinned_host.data())) return false;
+    return import_handoff(col0, n, pinned_host.data());
 #endif
 }
 

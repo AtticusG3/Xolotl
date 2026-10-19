@@ -100,6 +100,7 @@ struct Args {
     std::string split_device;
     std::string stage_devices;   ///< alias for --split-device (V100 stage ordinals only)
     std::string head_device;     ///< CUDA ordinal for output head + DSpark (--head-device / STRATA_HEAD_DEVICE)
+    std::string stage_pcie;      ///< optional per-stage pcie_frac list (comma-separated)
     bool split_skip_if_fits = false;
     int64_t conversation_cache_mib = 0;
     int conversation_cache_slots = 4;
@@ -186,6 +187,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--split-device") a.split_device = next();
         else if (k == "--stage-devices") a.stage_devices = next();
         else if (k == "--head-device") a.head_device = next();
+        else if (k == "--stage-pcie") a.stage_pcie = next();
         else if (k == "--split-skip-if-fits") a.split_skip_if_fits = true;
         else if (k == "--pool-workers" || k == "--max-context" || k == "--kv-resident" ||
                  k == "--spec" || k == "--spec-min-p" || k == "--batch" || k == "--batch-mtp" ||
@@ -411,16 +413,9 @@ int main(int argc, char ** argv) {
         } else {
             for (int d = 0; d < n_dev && (int) split_devs.size() < 2; ++d) split_devs.push_back(d);
         }
-        if (head_cuda_device >= 0) {
-            for (int sd : split_devs)
-                if (sd == head_cuda_device) {
-                    std::fprintf(stderr, "ds41_generate: head device %d must not appear in --stage-devices\n", head_cuda_device);
-                    return 2;
-                }
-            if (split_devs.size() < 2) {
-                std::fprintf(stderr, "ds41_generate: --head-device needs a layer split with two stage devices\n");
-                return 2;
-            }
+        if (head_cuda_device >= 0 && split_devs.size() < 2) {
+            std::fprintf(stderr, "ds41_generate: --head-device needs a multi-stage layer split\n");
+            return 2;
         }
         if (a.layer_split != "auto" && split_devs.size() < 2) {
             for (int d = 1; d < n_dev && (int) split_devs.size() < 2; ++d)
@@ -468,16 +463,22 @@ int main(int argc, char ** argv) {
                      a.prune_penalty > 0 ? ("penalised -" + std::to_string(a.prune_penalty)).c_str() : "masked out of routing", a.prune.c_str());
         mc.exclude = pruned;
     }
+    std::vector<double> stage_pcie_fracs;
+    if (!a.stage_pcie.empty()) {
+        std::stringstream ss(a.stage_pcie);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            if (tok.empty()) continue;
+            stage_pcie_fracs.push_back(std::atof(tok.c_str()));
+        }
+    }
     Ds41Pipeline pipe;
-    if (!ds41_build_pipeline(a.model, a.layer_split, split_devs, head_cuda_device, a.vram_margin_gib, dc, mc, src, pipe, err)) {
+    if (!ds41_build_pipeline(a.model, a.layer_split, split_devs, head_cuda_device, a.vram_margin_gib, stage_pcie_fracs, dc, mc, src,
+                            pipe, err)) {
         std::fprintf(stderr, "ds41_generate: pipeline: %s\n", err.c_str());
         return 1;
     }
     Ds41Dense & dense = ds41_head_dense(pipe);
-    auto head_logits = [&](int row0, int nrows, float * out) -> bool {
-        if (!ds41_head_logits(pipe, row0, nrows, out, err)) { ferr = err; return false; }
-        return true;
-    };
     const Ds41Geometry & G = pipe.dense(0).geom();
     const int n_layer = (int) G.n_layer, n_embd = (int) G.n_embd, top_k = (int) G.n_used, nv = (int) G.vocab;
     int CL = 0;
@@ -578,6 +579,10 @@ int main(int argc, char ** argv) {
     const int pass_max = std::max(1, std::getenv("STRATA_SERVE_PASS_M") ? std::atoi(std::getenv("STRATA_SERVE_PASS_M")) : 16);
     std::vector<float> crouted_m((size_t) std::max(pass_max, 17) * n_embd);   // 17: pass_v's DSpark seeding / verify passes
     std::string ferr;
+    auto head_logits = [&](int row0, int nrows, float * out) -> bool {
+        if (!ds41_head_logits(pipe, row0, nrows, out, err)) { ferr = err; return false; }
+        return true;
+    };
     // STRATA_DEC_PROF=1: per-stage wall time of the decode step (begin / predict+prefetch / attn_router / tier / finish)
     static const bool dprof = std::getenv("STRATA_DEC_PROF") != nullptr;
     // decode: finish(l) and predict(l+1) as one graph (identical results; STRATA_NO_FUSE_PREDICT=1 = separate graphs)
@@ -629,11 +634,10 @@ int main(int argc, char ** argv) {
         if (dprof) { const double t = now_ms(); dp[0] += t - ta; ta = t; }
         int32_t top16[16];
         bool have_pred = false;
-        const int split = ds41_split_at(pipe, n_layer);
         auto one_layer = [&](int l) -> bool {
             Ds41Dense & d = ds41_dense_for(pipe, l);
             Ds41MoeTier & t = ds41_tier_for(pipe, l);
-            const int stage_end = l < split ? split : n_layer;
+            const int stage_end = (int) pipe.layer_hi(ds41_stage_for_layer(pipe, l));
             float * rdev = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? d.routed_dev() : nullptr;
             if (file_pred) {
                 for (int k = 1; k <= kFP; ++k) {
@@ -714,13 +718,15 @@ int main(int argc, char ** argv) {
             }
             return true;
         };
-        for (int l = 0; l < split; ++l)
+        int cur_st = 0;
+        for (int l = 0; l < n_layer; ++l) {
+            const int st = ds41_stage_for_layer(pipe, l);
+            if (pipe.enabled() && st != cur_st) {
+                if (!ds41_sync_stages(pipe, cur_st, st, 0, 1, ferr)) return false;
+                if (!ds41_begin_stage_continued(pipe, st, &tok, 1, pos, false, ferr)) return false;
+                cur_st = st;
+            }
             if (!one_layer(l)) return false;
-        if (pipe.enabled()) {
-            if (!ds41_handoff_between_stages(pipe, 0, 1, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, &tok, 1, pos, false, ferr)) return false;
-            for (int l = split; l < n_layer; ++l)
-                if (!one_layer(l)) return false;
         }
         if (dprof && ++dp_n % 64 == 0)
             std::fprintf(stderr, "decode step ms/token: begin %.2f predict %.2f attn_router %.2f tier %.2f finish %.2f spec %.2f (%ld steps)\n",
@@ -738,7 +744,6 @@ int main(int argc, char ** argv) {
         mw.resize((size_t) m * top_k);
         double t0 = now_ms();
         if (!pipe.dense(0).begin(toks, m, pos)) { ferr = pipe.dense(0).last_error(); return false; }
-        const int split = ds41_split_at(pipe, n_layer);
         auto run_pm = [&](int l) -> bool {
             Ds41Dense & d = ds41_dense_for(pipe, l);
             Ds41MoeTier & tr = ds41_tier_for(pipe, l);
@@ -763,13 +768,15 @@ int main(int argc, char ** argv) {
             t0 = now_ms();
             return true;
         };
-        for (int l = 0; l < split; ++l)
+        int cur_st = 0;
+        for (int l = 0; l < n_layer; ++l) {
+            const int st = ds41_stage_for_layer(pipe, l);
+            if (pipe.enabled() && st != cur_st) {
+                if (!ds41_sync_stages(pipe, cur_st, st, 0, m, ferr)) return false;
+                if (!ds41_begin_stage_continued(pipe, st, toks, m, pos, false, ferr)) return false;
+                cur_st = st;
+            }
             if (!run_pm(l)) return false;
-        if (pipe.enabled()) {
-            if (!ds41_handoff_between_stages(pipe, 0, m, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, false, ferr)) return false;
-            for (int l = split; l < n_layer; ++l)
-                if (!run_pm(l)) return false;
         }
         return true;
     };
@@ -792,7 +799,6 @@ int main(int argc, char ** argv) {
         mw.resize((size_t) m * top_k);
         vh.assign((size_t) m * 3 * n_embd, 0.0f);
         if (!pipe.dense(0).begin(toks, m, pos)) { ferr = pipe.dense(0).last_error(); return false; }
-        const int split_pv = ds41_split_at(pipe, n_layer);
         // D3 prefetch (STRATA_D3_PF = slots per layer, default 1, 0 = off): before each layer's attention, predict
         // every pass token's routing (predict_multi), rank the union (score 16 - rank, summed over tokens) and DMA the
         // likely misses into the prefetch slots on the prefetch stream - they land under the attention.  PCIe is the
@@ -802,7 +808,7 @@ int main(int argc, char ** argv) {
         auto pv_layer = [&](int l) -> bool {
             Ds41Dense & d = ds41_dense_for(pipe, l);
             Ds41MoeTier & tr = ds41_tier_for(pipe, l);
-            const int stage_end = l < split_pv ? split_pv : n_layer;
+            const int stage_end = (int) pipe.layer_hi(ds41_stage_for_layer(pipe, l));
             float * rdev = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? d.routed_dev() : nullptr;
             const bool pf_now = rdev && !no_tier_batch && d3_pf > 0 && m <= Ds41MoeTier::kMaxMulti;
             if (pf_now) {
@@ -887,13 +893,15 @@ int main(int argc, char ** argv) {
             }
             return true;
         };
-        for (int l = 0; l < split_pv; ++l)
+        int cur_st = 0;
+        for (int l = 0; l < n_layer; ++l) {
+            const int st = ds41_stage_for_layer(pipe, l);
+            if (pipe.enabled() && st != cur_st) {
+                if (!ds41_sync_stages(pipe, cur_st, st, 0, m, ferr)) return false;
+                if (!ds41_begin_stage_continued(pipe, st, toks, m, pos, false, ferr)) return false;
+                cur_st = st;
+            }
             if (!pv_layer(l)) return false;
-        if (pipe.enabled()) {
-            if (!ds41_handoff_between_stages(pipe, 0, m, ferr)) return false;
-            if (!ds41_begin_stage1_continued(pipe, toks, m, pos, false, ferr)) return false;
-            for (int l = split_pv; l < n_layer; ++l)
-                if (!pv_layer(l)) return false;
         }
         vlog.resize((size_t) m * nv);
         if (!head_logits(0, m, vlog.data())) return false;
@@ -1098,15 +1106,15 @@ int main(int argc, char ** argv) {
                 double t0 = now_ms();
                 Ds41Dense * cur_dense = &pipe.dense(0);
                 Ds41MoeTier * cur_tier = &pipe.tier(0);
+                int cur_st = 0;
                 for (int l = 0; l < n_layer; ++l) {
-                    if (pipe.enabled() && l == pipe.split_layer) {
-                        if (!pipe.sync_handoff(0, B, ferr)) return false;
-                        if (!pipe.dense(1).begin_batch_continued(ids + c0, B, pos0 + c0)) {
-                            ferr = pipe.dense(1).last_error();
-                            return false;
-                        }
-                        cur_dense = &pipe.dense(1);
-                        cur_tier = &pipe.tier(1);
+                    const int st = ds41_stage_for_layer(pipe, l);
+                    if (pipe.enabled() && st != cur_st) {
+                        if (!ds41_sync_stages(pipe, cur_st, st, 0, B, ferr)) return false;
+                        if (!ds41_begin_stage_continued(pipe, st, ids + c0, B, pos0 + c0, true, ferr)) return false;
+                        cur_dense = &pipe.dense(st);
+                        cur_tier = &pipe.tier(st);
+                        cur_st = st;
                     }
                     if (l < 4) vram_log("batch layer", l);
                     // layer 20 is the last kv source: for phase A only its persistent KV writes run; layers 21-39 run
@@ -1188,12 +1196,15 @@ int main(int argc, char ** argv) {
                 if (!pipe.dense(0).begin(ids + c0, m, pos0 + c0)) { ferr = pipe.dense(0).last_error(); return false; }
                 Ds41Dense * cur_dense = &pipe.dense(0);
                 Ds41MoeTier * cur_tier = &pipe.tier(0);
+                int cur_st = 0;
                 for (int l = 0; l < n_layer; ++l) {
-                    if (pipe.enabled() && l == pipe.split_layer) {
-                        if (!pipe.sync_handoff(0, m, ferr)) return false;
-                        if (!ds41_begin_stage1_continued(pipe, ids + c0, m, pos0 + c0, false, ferr)) return false;
-                        cur_dense = &pipe.dense(1);
-                        cur_tier = &pipe.tier(1);
+                    const int st = ds41_stage_for_layer(pipe, l);
+                    if (pipe.enabled() && st != cur_st) {
+                        if (!ds41_sync_stages(pipe, cur_st, st, 0, m, ferr)) return false;
+                        if (!ds41_begin_stage_continued(pipe, st, ids + c0, m, pos0 + c0, false, ferr)) return false;
+                        cur_dense = &pipe.dense(st);
+                        cur_tier = &pipe.tier(st);
+                        cur_st = st;
                     }
                     const float * fn = nullptr;
                     if (!cur_dense->attn_router(l, cids.data(), cw.data(), &fn)) { ferr = cur_dense->last_error(); return false; }

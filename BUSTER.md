@@ -67,10 +67,13 @@ c++ -std=c++17 -I include tools/buster/test_cuda_cc_policy.cpp -o /tmp/test_cuda
 ## Run
 
 ```bash
-# Trunk only on both V100s:
-export CUDA_VISIBLE_DEVICES=1,2
-# Trunk on V100s + 3090 head (PCI 0 = 3090, 1–2 = V100s): leave all three visible and pass --head-device 0 --stage-devices 1,2 to the engine.
-# export CUDA_VISIBLE_DEVICES=0,1,2
+# (a) 2-stage trunk on V100s, head + DSpark on 3090:
+export CUDA_VISIBLE_DEVICES=0,1,2
+# Engine: --head-device 0 --stage-devices 1,2 --layer-split 20
+
+# (b) 3-stage: early layers + head + DSpark on 3090, rest on V100s (example split 9 / 25):
+# --head-device 0 --stage-devices 0,1,2 --layer-split 9,25
+# Optional per-stage PCIe: --stage-pcie 0.55,0.25,0.25
 export STRATA_BUILD_DIR=/opt/xolotl/build-buster
 python3 tools/v41/serve/serve_ds41.py --engine strata --config tools/v41/serve/strata-buster-ds41-1017.json --port 8150
 ```
