@@ -23,5 +23,5 @@ BUILD_DIR="${STRATA_BUILD_DIR:-$PWD/build-buster}"
 [ -x "$BUILD_DIR/ds41_generate" ] || BUILD_DIR="$PWD/build-xolotl"
 LOCK="${BUSTER_GPU_LOCK:-$HOME/.cache/xolotl/buster-gpu.lock}"
 mkdir -p "$(dirname "$LOCK")"
-exec flock "$LOCK" systemd-run --user --scope -q --unit="buster-ds41-$$" -p MemoryMax=100G -p MemorySwapMax=0 \
+exec flock "$LOCK" systemd-run --user --scope -q --unit="buster-ds41-$$" -p MemoryMax=140G -p MemorySwapMax=0 \
   "$BUILD_DIR/ds41_generate" "$@"
