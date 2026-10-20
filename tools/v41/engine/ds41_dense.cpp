@@ -1904,13 +1904,59 @@ namespace {
 enum Ds41HandoffMode { kHandoffSameDevice, kHandoffPeer, kHandoffPinnedHost };
 
 #ifdef STRATA_ENABLE_CUDA
+/// Same probe as Strata peer experts (#2666): peer access must move data both ways exactly.
+bool ds41_p2p_copies_data(int dev_a, int dev_b) {
+    constexpr size_t kN = 1 << 14;
+    std::vector<float> h(kN), back(kN);
+    for (size_t i = 0; i < kN; ++i) h[i] = 1.0f + (float) ((i * 2654435761u) % 4093u);
+    float* d[2] = {nullptr, nullptr};
+    const int dev[2] = {dev_a, dev_b};
+    bool ok = true, tested = true;
+    for (int k = 0; k < 2 && tested; ++k) {
+        cudaSetDevice(dev[k]);
+        if (cudaMalloc((void**) &d[k], kN * 4) != cudaSuccess) { cudaGetLastError(); tested = false; }
+    }
+    for (int dir = 0; dir < 2 && tested && ok; ++dir) {
+        const int from = dir == 0 ? 0 : 1, to = 1 - from;
+        cudaSetDevice(dev[from]);
+        if (cudaMemcpy(d[from], h.data(), kN * 4, cudaMemcpyHostToDevice) != cudaSuccess) { tested = false; break; }
+        cudaSetDevice(dev[to]);
+        if (cudaMemset(d[to], 0, kN * 4) != cudaSuccess) { tested = false; break; }
+        if (cudaMemcpyPeer(d[to], dev[to], d[from], dev[from], kN * 4) != cudaSuccess) { tested = false; break; }
+        cudaSetDevice(dev[to]);
+        if (cudaMemcpy(back.data(), d[to], kN * 4, cudaMemcpyDeviceToHost) != cudaSuccess) { tested = false; break; }
+        ok = std::memcmp(back.data(), h.data(), kN * 4) == 0;
+    }
+    for (int k = 0; k < 2; ++k)
+        if (d[k] != nullptr) { cudaSetDevice(dev[k]); cudaFree(d[k]); }
+    if (!tested) { cudaGetLastError(); return true; }
+    return ok;
+}
+
 Ds41HandoffMode ds41_handoff_mode(int src_dev, int dst_dev) {
     if (src_dev < 0 || dst_dev < 0) return kHandoffPinnedHost;
     if (src_dev == dst_dev) return kHandoffSameDevice;
     int ab = 0, ba = 0;
     cudaDeviceCanAccessPeer(&ab, src_dev, dst_dev);
     cudaDeviceCanAccessPeer(&ba, dst_dev, src_dev);
-    return (ab && ba) ? kHandoffPeer : kHandoffPinnedHost;
+    if (!ab || !ba) return kHandoffPinnedHost;
+    cudaSetDevice(dst_dev);
+    cudaError_t e0 = cudaDeviceEnablePeerAccess(src_dev, 0);
+    if (e0 == cudaErrorPeerAccessAlreadyEnabled) { cudaGetLastError(); e0 = cudaSuccess; }
+    cudaSetDevice(src_dev);
+    cudaError_t e1 = cudaDeviceEnablePeerAccess(dst_dev, 0);
+    if (e1 == cudaErrorPeerAccessAlreadyEnabled) { cudaGetLastError(); e1 = cudaSuccess; }
+    if (e0 != cudaSuccess || e1 != cudaSuccess) return kHandoffPinnedHost;
+    if (!ds41_p2p_copies_data(src_dev, dst_dev)) {
+        cudaSetDevice(dst_dev);
+        cudaDeviceDisablePeerAccess(src_dev);
+        cudaGetLastError();
+        cudaSetDevice(src_dev);
+        cudaDeviceDisablePeerAccess(dst_dev);
+        cudaGetLastError();
+        return kHandoffPinnedHost;
+    }
+    return kHandoffPeer;
 }
 
 const char * ds41_handoff_mode_name(Ds41HandoffMode m) {
