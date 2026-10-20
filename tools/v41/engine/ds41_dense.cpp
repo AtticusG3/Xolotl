@@ -973,7 +973,8 @@ static bool alloc_cols(Ds41Dense::Impl & im, int64_t NC, std::string & err) {
     im.o_wts = ggml_new_tensor_2d(c, GGML_TYPE_F32, im.NU, NC);
     im.routed = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, NC);
     im.cand = ggml_new_tensor_2d(c, GGML_TYPE_I32, im.CB, NC);
-    for (int64_t l = 0; l < im.nl; ++l) {
+    for (int64_t l = 0; l < (int64_t) im.ly.size(); ++l) {
+        if (!im.active_layer(l)) continue;
         auto & L = im.ly[(size_t) l];
         if (!L.idx_src) continue;
         L.sel = ggml_new_tensor_2d(c, GGML_TYPE_I32, im.ITOP, NC);
@@ -1704,6 +1705,7 @@ bool Ds41Dense::read_state_cols(int c0, int n, std::vector<float> & x) {
 bool Ds41Dense::snapshot(int pos) {
     Impl & im = *p_;
     for (auto & L : im.ly) {
+        if (!L.raw || !L.raw_snap) continue;
         ggml_backend_tensor_copy(L.raw, L.raw_snap);
         if (L.st_kv) { ggml_backend_tensor_copy(L.st_kv, L.st_kv_snap); ggml_backend_tensor_copy(L.st_sc, L.st_sc_snap); }
     }
@@ -1716,6 +1718,7 @@ bool Ds41Dense::restore() {
     Impl & im = *p_;
     if (im.snap_pos < 0) return false;
     for (auto & L : im.ly) {
+        if (!L.raw || !L.raw_snap) continue;
         ggml_backend_tensor_copy(L.raw_snap, L.raw);
         if (L.st_kv) { ggml_backend_tensor_copy(L.st_kv_snap, L.st_kv); ggml_backend_tensor_copy(L.st_sc_snap, L.st_sc); }
     }
@@ -1736,6 +1739,7 @@ bool Ds41Dense::park(int64_t positions) {
         im.parked.push_back(std::move(r));
     };
     for (auto & L : im.ly) {
+        if (!L.raw) continue;
         for (ggml_tensor * t : { L.raw_snap, L.st_kv_snap, L.st_sc_snap })
             if (t) put(t, 0, ggml_nbytes(t));
         for (ggml_tensor * t : { L.comp, L.idxk }) {   // row r holds a position >= r (ratio 1 or 2): rows [0, n] cover n positions
