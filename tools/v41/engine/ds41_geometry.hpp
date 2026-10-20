@@ -83,15 +83,24 @@ struct Ds41Geometry {
     }
     int64_t hc_mix() const { return (2 + hc) * hc; }
 
-    /// True if a pipeline may start a new stage at layer `split` (no cross-stage indexer / KV / cand deps).
+    /// True if a pipeline may start a new stage at layer `split`.  Layers on the next stage that read indexer or
+    /// compressed KV from below `split` are carried as shadow layers (`stage_import_layers`); handoff copies their
+    /// live cache at each column boundary, so a split does not have to fall on an index-source layer.
     bool split_boundary_ok(int64_t split) const {
         if (split <= 0 || split >= n_layer) return false;
+        const std::vector<int64_t> imp = stage_import_layers(split, n_layer);
+        auto imported = [&](int64_t x) {
+            if (x < 0) return true;
+            for (int64_t y : imp) if (y == x) return true;
+            return false;
+        };
         for (int64_t l = split; l < n_layer; ++l) {
             const int64_t ix = idx_src(l);
             const int64_t kv = kv_src(l);
-            if (ix >= 0 && ix < split) return false;
-            if (kv >= 0 && kv < split) return false;
-            if (cand_layer >= 0 && l > cand_layer && is_index_source(l) && cand_layer < split) return false;
+            if (ix >= 0 && ix < split && !imported(ix)) return false;
+            if (kv >= 0 && kv < split && !imported(kv)) return false;
+            if (cand_layer >= 0 && l > cand_layer && is_index_source(l) && cand_layer < split && !imported(cand_layer))
+                return false;
         }
         return true;
     }
